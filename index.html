@@ -60,6 +60,7 @@
   </header>
 
   <button id="connect">Connect Spotify</button>
+  <button id="wake" class="flat" style="display:none;width:100%;margin-top:12px;padding:14px;background:#b8860b">Wake Spotify (opens the Spotify app)</button>
 
   <div class="card">
     <div class="label">NOW PLAYING</div>
@@ -115,6 +116,14 @@
     <label>ElevenLabs Voice ID</label><input type="text" id="cVoice" autocapitalize="off" autocorrect="off">
     <label>Gemini API key (writes the DJ lines)</label><input type="password" id="cGemini">
     <label>Town (like: Yakima, Washington)</label><input type="text" id="cCity">
+    <label>How the DJ shares the speakers with Spotify</label>
+    <select id="cAudio" style="width:100%">
+      <option value="duck">Duck: music keeps playing, quieter (try first)</option>
+      <option value="mix">Mix: music keeps playing at full volume</option>
+      <option value="solo">Interrupt: iPhone pauses the music, then resumes it</option>
+      <option value="classic">Classic: page pauses Spotify, then presses play</option>
+    </select>
+    <p>If the music stops and doesn't come back, or you can't hear the DJ, try another option here. Duck and Mix may be silent if your iPhone's silent switch is on.</p>
     <p>Your keys stay on this phone only (in Safari's storage for this page). They are never in the page's code.</p>
     <button class="save" id="saveCfg">Save</button>
     <button class="flat" id="closeCfg" style="width:100%;margin-top:8px">Close</button>
@@ -155,7 +164,7 @@ const DEFAULT_CFG = {
   spotifyClientId: '', elevenKey: '', elevenVoice: '', geminiKey: '',
   city: 'Yakima, Washington', lat: 46.60, lon: -120.51, djName: 'Cara',
   breakMin: 2, breakMax: 5, breakingEnabled: true, breakingTest: false,
-  elevenModel: 'eleven_multilingual_v2',
+  elevenModel: 'eleven_multilingual_v2', audioMode: 'duck',
 };
 let cfg = { ...DEFAULT_CFG };
 try { cfg = { ...DEFAULT_CFG, ...JSON.parse(localStorage.getItem('cara_cfg') || '{}') }; } catch (e) {}
@@ -318,10 +327,12 @@ async function getAccess() {
   if (tok.exp - 60000 < Date.now()) await tokenRequest({ grant_type: 'refresh_token', refresh_token: tok.refresh });
   return tok.access;
 }
-async function sp(method, path, retry = true) {
-  const r = await fetchTimeout('https://api.spotify.com/v1' + path, { method, headers: { Authorization: 'Bearer ' + await getAccess() } }, 10000);
-  if (r.status === 401 && retry) { tok.exp = 0; return sp(method, path, false); }
-  if (r.status === 429) { await sleep((+r.headers.get('retry-after') || 2) * 1000); return sp(method, path, false); }
+async function sp(method, path, body, retry = true) {
+  const headers = { Authorization: 'Bearer ' + await getAccess() };
+  if (body) headers['Content-Type'] = 'application/json';
+  const r = await fetchTimeout('https://api.spotify.com/v1' + path, { method, headers, body: body ? JSON.stringify(body) : undefined }, 10000);
+  if (r.status === 401 && retry) { tok.exp = 0; return sp(method, path, body, false); }
+  if (r.status === 429) { await sleep((+r.headers.get('retry-after') || 2) * 1000); return sp(method, path, body, false); }
   let data = null; if (r.status !== 204) { try { data = await r.json(); } catch (e) {} }
   return { ok: r.ok, status: r.status, data };
 }
@@ -334,6 +345,30 @@ const spPause = () => sp('PUT', '/me/player/pause' + devQ());
 const spPlay = () => sp('PUT', '/me/player/play' + devQ());
 const spNext = () => sp('POST', '/me/player/next' + devQ());
 const spPrev = () => sp('POST', '/me/player/previous' + devQ());
+const okish = r => r.ok || r.status === 403;          // 403 = "already playing", which is fine
+
+// Get the music going again, even if Spotify's phone app dropped off the network while we talked.
+async function resumeSpotify() {
+  let r = await spPlay();
+  if (okish(r)) { showWake(false); return true; }
+  r = await sp('PUT', '/me/player/play');              // try again without the remembered device
+  if (okish(r)) { showWake(false); return true; }
+  const d = await sp('GET', '/me/player/devices');     // maybe it is listed under another id
+  const dev = ((d.data || {}).devices || []).find(x => !x.is_restricted);
+  if (dev) {
+    const t = await sp('PUT', '/me/player', { device_ids: [dev.id], play: true });
+    if (okish(t)) { state.deviceId = dev.id; showWake(false); return true; }
+  }
+  log('Spotify went to sleep on the phone. Tap "Wake Spotify", press play there, then come back.');
+  showWake(true);
+  return false;
+}
+async function ensureMusic() {
+  try { await poll(); } catch (e) {}
+  if (state.hasItem && state.playing) { showWake(false); return; }
+  await resumeSpotify();
+}
+function showWake(on) { const b = $('wake'); if (b) b.style.display = on ? 'block' : 'none'; }
 
 function trackInfo(item) {
   if (!item || item.is_local) return null;
@@ -367,7 +402,9 @@ const describe = t => t ? `${t.title} by ${t.artist}` : null;
 const STYLE_HINTS = {
   silent: "The music has just stopped completely, so it's just you alone on the mic. Come in LOUD and high-energy, like a big dramatic 'whoa, the music stopped!' moment, and end by building up to the next song kicking in, like 'here we go!'. Never whisper, never say 'shh' or hush the listener.",
   outro: "You are barging in on the last seconds of the song, so it's paused while you talk. Cut in with big energy, and end by promising to let the song finish, like 'okay okay, finish it off!'.",
-  intro: "The next song has only just started, and you've jumped in to talk over its opening, so it's paused for a moment. Keep it quick and punchy and end by hyping the song, like 'okay, back to it!'.",
+  intro: "The next song has only just started, and you've jumped in to talk over its opening. Keep it quick and punchy and end by hyping the song, like 'okay, back to it!'.",
+  talkover: "The song is still playing underneath your voice and it is about to end. Talk like you're riding the end of the song and handing off to the next one with energy. Don't say goodbye or sign off; it should flow straight into the next track.",
+  early: "The song is still playing quietly underneath your voice, and you're chatting over its last stretch. Keep it lively, and end by handing off to whatever comes next. Don't say goodbye.",
 };
 async function songFacts(info, when) {
   let f = `${when} song is "${info.title}" by ${info.artist}` + (info.album ? `, from the album "${info.album}"` : '') +
@@ -456,6 +493,14 @@ function templateBreak(style, topic, ctx) {
 }
 
 // ---------------------------------------------------------------- voice
+const AUDIO_TYPES = { duck: 'transient', solo: 'transient-solo', mix: 'ambient', classic: 'playback' };
+const canMix = () => cfg.audioMode !== 'classic' && typeof navigator !== 'undefined' && 'audioSession' in navigator;
+const keepsMusicPlaying = () => canMix() && (cfg.audioMode === 'duck' || cfg.audioMode === 'mix');
+function setAudioType() {
+  if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+    try { navigator.audioSession.type = AUDIO_TYPES[cfg.audioMode] || 'playback'; } catch (e) {}
+  }
+}
 const silentWav = () => wavUrl(new Float32Array(2205), 22050);
 function wavUrl(samples, sr) {
   const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
@@ -500,6 +545,7 @@ function playClip(clip) {
     if (clip.url) {
       const a = $('voice');
       a.onended = finish; a.onerror = () => { log('The audio could not play.'); finish(); };
+      setAudioType();
       a.src = clip.url;
       a.play().catch(e => { log('Could not play audio (tap START DJ again): ' + e.message); finish(); });
     } else if (window.speechSynthesis) {
@@ -552,25 +598,30 @@ function rollInterval() {
   return n;
 }
 function pickStyle(last) {
-  const names = ['silent', 'outro', 'intro'].filter(n => n !== last);
-  return pick(names);
+  const all = keepsMusicPlaying() ? ['talkover', 'early', 'intro'] : ['silent', 'outro', 'intro'];
+  return pick(all.filter(n => n !== last));
 }
 function showLine(text) { const el = $('djline'); if (el) el.textContent = '"' + text + '"'; }
 
 async function interrupt(clip, opts = {}) {
   run.busy = true;
+  const mixing = keepsMusicPlaying();               // Spotify keeps playing underneath her
+  const solo = canMix() && cfg.audioMode === 'solo'; // iOS pauses Spotify itself, then should resume it
   try {
-    await spPause();
+    if (!mixing && !solo) await spPause();
     if (opts.chime) await playClip({ url: chimeUrl() });
     await playClip(clip);
-    if (opts.skipToNext) {                 // the old song is over: move on to the next one
-      await sleep(150);
-      const cur = await sp('GET', '/me/player');
-      if (cur.data && cur.data.item && cur.data.item.uri === opts.uri) await spNext();
-      await sleep(300);
+    if (mixing) { await sleep(500); await ensureMusic(); }
+    else if (solo) { await sleep(1200); await ensureMusic(); }
+    else {
+      if (opts.skipToNext) {                        // the old song is over: move on to the next one
+        await sleep(150);
+        const cur = await sp('GET', '/me/player');
+        if (cur.data && cur.data.item && cur.data.item.uri === opts.uri) await spNext();
+        await sleep(300);
+      }
+      await resumeSpotify();
     }
-    const r = await spPlay();
-    if (!r.ok && r.status !== 403) log('Could not resume Spotify (tap play in the Spotify app): ' + ((r.data && r.data.error && r.data.error.message) || r.status));
   } finally {
     if (clip.url) URL.revokeObjectURL(clip.url);
     run.busy = false; run.lastPoll = 0;
@@ -588,7 +639,8 @@ async function buildBreak(style, forced) {
     showLine(text);
     const clip = await synth(text);
     const p = { clip, style, forUri: state.uri,
-                pauseMs: randInt(700, 1100), outroMs: randInt(8000, 12000), introAt: randInt(3000, 7000) };
+                pauseMs: randInt(700, 1100), outroMs: randInt(8000, 12000), talkMs: randInt(6000, 11000),
+                earlyMs: randInt(13000, 18000), introAt: keepsMusicPlaying() ? randInt(500, 3000) : randInt(3000, 7000) };
     if (forced) { run.building = false; log('[transition: test]'); await interrupt(clip, {}); return; }
     run.prepared = p;
   } catch (e) { log('Could not build a DJ break: ' + e.message); }
@@ -644,7 +696,7 @@ async function tick() {
     const due = run.songsSince >= run.nextAfter;
 
     // test buttons
-    if (run.forceBreak && !run.building) { run.forceBreak = false; log('Testing a DJ break...'); buildBreak('outro', true); return; }
+    if (run.forceBreak && !run.building) { run.forceBreak = false; log('Testing a DJ break...'); buildBreak(keepsMusicPlaying() ? 'talkover' : 'outro', true); return; }
     if (run.forceBrk && !run.brk && !run.brkBuilding) { run.forceBrk = false; log('Testing breaking news...'); run.brkBuilding = true; buildBreaking(state.uri, 0, true); return; }
 
     // breaking news, mid-song
@@ -668,6 +720,8 @@ async function tick() {
       let go = false;
       if (p.style === 'silent') go = state.uri === p.forUri && remaining <= p.pauseMs;
       else if (p.style === 'outro') go = state.uri === p.forUri && remaining <= p.outroMs;
+      else if (p.style === 'talkover') go = state.uri === p.forUri && remaining <= p.talkMs;
+      else if (p.style === 'early') go = state.uri === p.forUri && remaining <= p.earlyMs;
       else go = state.uri !== p.forUri && progress >= p.introAt;      // intro: after the next song starts
       if (go) {
         run.prepared = null; run.songsSince = 0; run.lastStyle = p.style; run.nextAfter = rollInterval();
@@ -688,14 +742,14 @@ async function keepAwake() {
 async function startDJ() {
   if (!state.connected) { log('Connect Spotify first.'); return; }
   const wasPlaying = state.playing;
+  setAudioType();
   // iOS only lets a page play sound after a tap, so unlock the audio right now
   try { const a = $('voice'); a.src = silentWav(); a.play().catch(() => {}); } catch (e) {}
-  try { if (window.speechSynthesis) speechSynthesis.speak(new SpeechSynthesisUtterance(' ')); } catch (e) {}
   run.on = true; run.songsSince = 0; run.lastUri = null; run.prepared = null; run.lastStyle = null;
   run.nextAfter = rollInterval();
   keepAwake();
   log('Keep this page open with the screen on. Music keeps playing in the Spotify app.');
-  if (wasPlaying) setTimeout(() => spPlay().catch(() => {}), 900);   // in case the unlock blip paused Spotify
+  if (wasPlaying) setTimeout(() => ensureMusic().catch(() => {}), 1200);   // in case the unlock blip paused Spotify
 }
 function stopDJ() {
   run.on = false;
@@ -726,12 +780,13 @@ function render() {
 function openSettings() {
   $('ruri').textContent = redirectUri();
   $('cSpotify').value = cfg.spotifyClientId; $('cEleven').value = cfg.elevenKey; $('cVoice').value = cfg.elevenVoice;
-  $('cGemini').value = cfg.geminiKey; $('cCity').value = cfg.city;
+  $('cGemini').value = cfg.geminiKey; $('cCity').value = cfg.city; $('cAudio').value = cfg.audioMode;
   $('modal').classList.add('open');
 }
 async function saveSettings() {
   cfg.spotifyClientId = $('cSpotify').value.trim(); cfg.elevenKey = $('cEleven').value.trim();
   cfg.elevenVoice = $('cVoice').value.trim(); cfg.geminiKey = $('cGemini').value.trim();
+  cfg.audioMode = $('cAudio').value;
   const city = $('cCity').value.trim() || DEFAULT_CFG.city;
   if (city !== cfg.city) {
     cfg.city = city;
@@ -756,6 +811,7 @@ async function init() {
   ['bmin', 'bmax', 'brkOn', 'brkTest'].forEach(id => $(id).addEventListener('change', readOptions));
   $('openSettings').onclick = openSettings; $('closeCfg').onclick = () => $('modal').classList.remove('open');
   $('saveCfg').onclick = saveSettings; $('connect').onclick = startLogin;
+  $('wake').onclick = () => { location.href = 'spotify://'; };
   $('copyUri').onclick = () => { navigator.clipboard && navigator.clipboard.writeText(redirectUri()).then(() => log('Address copied.')); };
   $('djbtn').onclick = () => run.on ? stopDJ() : startDJ();
   $('play').onclick = async () => { await (state.playing ? spPause() : spPlay()); run.lastPoll = 0; };
