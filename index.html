@@ -118,12 +118,19 @@
     <label>Town (like: Yakima, Washington)</label><input type="text" id="cCity">
     <label>How the DJ shares the speakers with Spotify</label>
     <select id="cAudio" style="width:100%">
-      <option value="duck">Duck: music keeps playing, quieter (try first)</option>
-      <option value="mix">Mix: music keeps playing at full volume</option>
-      <option value="solo">Interrupt: iPhone pauses the music, then resumes it</option>
+      <option value="solo">Interrupt: music pauses while she talks, then resumes (try first)</option>
+      <option value="volume">Lower volume: page turns Spotify down (may not work on iPhone)</option>
+      <option value="duck">Overlap: music keeps playing at full volume, she talks over it</option>
+      <option value="mix">Overlap (mix): same, a different iPhone setting</option>
       <option value="classic">Classic: page pauses Spotify, then presses play</option>
     </select>
-    <p>If the music stops and doesn't come back, or you can't hear the DJ, try another option here. Duck and Mix may be silent if your iPhone's silent switch is on.</p>
+    <label>DJ voice loudness</label>
+    <select id="cBoost" style="width:100%">
+      <option value="1">Normal</option>
+      <option value="1.8">Louder</option>
+      <option value="2.6">Much louder (over music)</option>
+    </select>
+    <p>If the music stops and doesn't come back, or you can't hear the DJ, try another option. Overlap modes may be silent if your iPhone's silent switch is on.</p>
     <p>Your keys stay on this phone only (in Safari's storage for this page). They are never in the page's code.</p>
     <button class="save" id="saveCfg">Save</button>
     <button class="flat" id="closeCfg" style="width:100%;margin-top:8px">Close</button>
@@ -164,7 +171,7 @@ const DEFAULT_CFG = {
   spotifyClientId: '', elevenKey: '', elevenVoice: '', geminiKey: '',
   city: 'Yakima, Washington', lat: 46.60, lon: -120.51, djName: 'Cara',
   breakMin: 2, breakMax: 5, breakingEnabled: true, breakingTest: false,
-  elevenModel: 'eleven_multilingual_v2', audioMode: 'duck',
+  elevenModel: 'eleven_multilingual_v2', audioMode: 'solo', boost: 1,
 };
 let cfg = { ...DEFAULT_CFG };
 try { cfg = { ...DEFAULT_CFG, ...JSON.parse(localStorage.getItem('cara_cfg') || '{}') }; } catch (e) {}
@@ -339,12 +346,14 @@ async function sp(method, path, body, retry = true) {
 
 // ---------------------------------------------------------------- player state
 const state = { connected: false, hasItem: false, playing: false, uri: null, name: '', artist: '', track: null,
-                duration: 0, progress: 0, stamp: 0, deviceId: null };
+                duration: 0, progress: 0, stamp: 0, deviceId: null, volume: null, supportsVolume: null };
 const devQ = () => state.deviceId ? '?device_id=' + encodeURIComponent(state.deviceId) : '';
 const spPause = () => sp('PUT', '/me/player/pause' + devQ());
 const spPlay = () => sp('PUT', '/me/player/play' + devQ());
 const spNext = () => sp('POST', '/me/player/next' + devQ());
 const spPrev = () => sp('POST', '/me/player/previous' + devQ());
+const spVolume = pct => sp('PUT', '/me/player/volume?volume_percent=' + Math.round(pct) +
+  (state.deviceId ? '&device_id=' + encodeURIComponent(state.deviceId) : ''));
 const okish = r => r.ok || r.status === 403;          // 403 = "already playing", which is fine
 
 // Get the music going again, even if Spotify's phone app dropped off the network while we talked.
@@ -390,6 +399,7 @@ async function poll() {
     artist: (item.artists || []).map(a => a.name).join(', ') || (item.show && item.show.name) || '',
     track: trackInfo(item), duration: item.duration_ms || 1, progress: pb.progress_ms || 0,
     stamp: (t0 + t1) / 2, deviceId: (pb.device && pb.device.id) || state.deviceId,
+    volume: pb.device ? pb.device.volume_percent : null, supportsVolume: pb.device ? pb.device.supports_volume : null,
   });
 }
 async function getNextTrack() {
@@ -493,13 +503,34 @@ function templateBreak(style, topic, ctx) {
 }
 
 // ---------------------------------------------------------------- voice
-const AUDIO_TYPES = { duck: 'transient', solo: 'transient-solo', mix: 'ambient', classic: 'playback' };
-const canMix = () => cfg.audioMode !== 'classic' && typeof navigator !== 'undefined' && 'audioSession' in navigator;
-const keepsMusicPlaying = () => canMix() && (cfg.audioMode === 'duck' || cfg.audioMode === 'mix');
+const AUDIO_TYPES = { duck: 'transient', volume: 'transient', solo: 'transient-solo', mix: 'ambient', classic: 'playback' };
+// the mode actually in use (the volume mode falls back to Interrupt if the iPhone refuses volume changes)
+const mode = () => (cfg.audioMode === 'volume' && run.volumeBroken) ? 'solo' : cfg.audioMode;
+const canMix = () => mode() !== 'classic' && typeof navigator !== 'undefined' && 'audioSession' in navigator;
+const keepsMusicPlaying = () => canMix() && ['duck', 'mix', 'volume'].includes(mode());
 function setAudioType() {
   if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
-    try { navigator.audioSession.type = AUDIO_TYPES[cfg.audioMode] || 'playback'; } catch (e) {}
+    try { navigator.audioSession.type = AUDIO_TYPES[mode()] || 'playback'; } catch (e) {}
   }
+}
+
+// Optional: make her voice louder than the music (only turned on if you pick a louder setting)
+let actx = null, gainNode = null;
+function applyBoost() {
+  const g = +cfg.boost || 1;
+  try {
+    if (g <= 1 && !gainNode) return;
+    if (!actx) {
+      actx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = actx.createMediaElementSource($('voice'));
+      gainNode = actx.createGain();
+      const comp = actx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.ratio.value = 8;
+      src.connect(gainNode); gainNode.connect(comp); comp.connect(actx.destination);
+    }
+    gainNode.gain.value = g;
+    if (actx.state !== 'running') actx.resume();
+  } catch (e) { log('Voice boost is not available: ' + e.message); }
 }
 const silentWav = () => wavUrl(new Float32Array(2205), 22050);
 function wavUrl(samples, sr) {
@@ -545,7 +576,7 @@ function playClip(clip) {
     if (clip.url) {
       const a = $('voice');
       a.onended = finish; a.onerror = () => { log('The audio could not play.'); finish(); };
-      setAudioType();
+      setAudioType(); applyBoost();
       a.src = clip.url;
       a.play().catch(e => { log('Could not play audio (tap START DJ again): ' + e.message); finish(); });
     } else if (window.speechSynthesis) {
@@ -589,7 +620,7 @@ Rules:
 // ---------------------------------------------------------------- the DJ engine
 const run = { on: false, busy: false, lock: false, wake: null, lastPoll: 0, lastUri: null,
   songsSince: 0, nextAfter: 3, lastStyle: null, prepared: null, building: false,
-  brk: null, brkBuilding: false, songsSinceBrk: 999, forceBreak: false, forceBrk: false };
+  brk: null, brkBuilding: false, songsSinceBrk: 999, forceBreak: false, forceBrk: false, volumeBroken: false };
 
 function rollInterval() {
   const lo = Math.max(1, cfg.breakMin | 0), hi = Math.max(lo, cfg.breakMax | 0);
@@ -605,16 +636,28 @@ function showLine(text) { const el = $('djline'); if (el) el.textContent = '"' +
 
 async function interrupt(clip, opts = {}) {
   run.busy = true;
-  const mixing = keepsMusicPlaying();               // Spotify keeps playing underneath her
-  const solo = canMix() && cfg.audioMode === 'solo'; // iOS pauses Spotify itself, then should resume it
+  const mixing = keepsMusicPlaying();                // Spotify keeps playing underneath her
+  const solo = canMix() && mode() === 'solo';         // iOS pauses Spotify itself, then should resume it
+  let restoreVol = null;
   try {
+    if (mode() === 'volume' && mixing) {              // lower Spotify's own volume while she talks
+      const orig = state.volume > 0 ? state.volume : 100;
+      const r = await spVolume(Math.max(3, Math.round(orig * 0.15)));
+      if (r.ok) restoreVol = orig;
+      else {
+        run.volumeBroken = true;
+        log("This iPhone won't let the page change Spotify's volume, so I switched to Interrupt mode: " +
+            ((r.data && r.data.error && (r.data.error.reason || r.data.error.message)) || r.status));
+      }
+    }
     if (!mixing && !solo) await spPause();
     if (opts.chime) await playClip({ url: chimeUrl() });
     await playClip(clip);
+    if (restoreVol !== null) { await spVolume(restoreVol); restoreVol = null; }
     if (mixing) { await sleep(500); await ensureMusic(); }
     else if (solo) { await sleep(1200); await ensureMusic(); }
     else {
-      if (opts.skipToNext) {                        // the old song is over: move on to the next one
+      if (opts.skipToNext) {                          // the old song is over: move on to the next one
         await sleep(150);
         const cur = await sp('GET', '/me/player');
         if (cur.data && cur.data.item && cur.data.item.uri === opts.uri) await spNext();
@@ -623,6 +666,7 @@ async function interrupt(clip, opts = {}) {
       await resumeSpotify();
     }
   } finally {
+    if (restoreVol !== null && run.busy) { try { await spVolume(restoreVol); } catch (e) {} }
     if (clip.url) URL.revokeObjectURL(clip.url);
     run.busy = false; run.lastPoll = 0;
   }
@@ -742,7 +786,12 @@ async function keepAwake() {
 async function startDJ() {
   if (!state.connected) { log('Connect Spotify first.'); return; }
   const wasPlaying = state.playing;
-  setAudioType();
+  run.volumeBroken = false;
+  if (cfg.audioMode === 'volume' && state.supportsVolume === false) {
+    run.volumeBroken = true;
+    log('Spotify says this iPhone does not allow volume control from the page, so I will use Interrupt mode instead.');
+  }
+  setAudioType(); applyBoost();
   // iOS only lets a page play sound after a tap, so unlock the audio right now
   try { const a = $('voice'); a.src = silentWav(); a.play().catch(() => {}); } catch (e) {}
   run.on = true; run.songsSince = 0; run.lastUri = null; run.prepared = null; run.lastStyle = null;
@@ -780,13 +829,13 @@ function render() {
 function openSettings() {
   $('ruri').textContent = redirectUri();
   $('cSpotify').value = cfg.spotifyClientId; $('cEleven').value = cfg.elevenKey; $('cVoice').value = cfg.elevenVoice;
-  $('cGemini').value = cfg.geminiKey; $('cCity').value = cfg.city; $('cAudio').value = cfg.audioMode;
+  $('cGemini').value = cfg.geminiKey; $('cCity').value = cfg.city; $('cAudio').value = cfg.audioMode; $('cBoost').value = String(cfg.boost);
   $('modal').classList.add('open');
 }
 async function saveSettings() {
   cfg.spotifyClientId = $('cSpotify').value.trim(); cfg.elevenKey = $('cEleven').value.trim();
   cfg.elevenVoice = $('cVoice').value.trim(); cfg.geminiKey = $('cGemini').value.trim();
-  cfg.audioMode = $('cAudio').value;
+  cfg.audioMode = $('cAudio').value; cfg.boost = +$('cBoost').value || 1; run.volumeBroken = false;
   const city = $('cCity').value.trim() || DEFAULT_CFG.city;
   if (city !== cfg.city) {
     cfg.city = city;
