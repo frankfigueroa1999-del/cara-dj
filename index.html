@@ -88,6 +88,30 @@
       <span>songs (random)</span>
     </div>
     <div class="row">
+      <span>Stinger chance</span>
+      <input type="number" id="stChance" min="0" max="100" step="5" inputmode="numeric">
+      <span>% of silent breaks</span>
+    </div>
+    <div class="row">
+      <span style="min-width:104px">Stinger volume</span>
+      <input type="range" id="stVol" min="0" max="100" style="flex:1;accent-color:#1db954">
+    </div>
+    <div class="row">
+      <span style="min-width:104px">DJ mood</span>
+      <select id="mood" style="flex:1">
+        <option value="chill">Chill</option>
+        <option value="normal">Normal</option>
+        <option value="unhinged">Unhinged</option>
+        <option value="mixed">Mixed (random)</option>
+      </select>
+    </div>
+    <div class="row" style="margin-top:14px"><span class="label" style="width:100%">QUEUE NEXT (happens at the end of this song)</span></div>
+    <div class="tests" style="margin-top:6px">
+      <button class="flat" id="q1">Silent</button>
+      <button class="flat" id="q2">Outro</button>
+      <button class="flat" id="q3">Over intro</button>
+    </div>
+    <div class="row">
       <label><input type="checkbox" id="brkOn">Breaking news (rare, mid-song)</label>
     </div>
     <div class="row">
@@ -96,6 +120,9 @@
     <div class="tests">
       <button class="flat" id="testBreak">Test DJ now</button>
       <button class="flat" id="testBreaking">Test breaking news</button>
+    </div>
+    <div class="tests" style="margin-top:8px">
+      <button class="flat" id="testSting">Test stinger</button>
     </div>
   </div>
 
@@ -114,6 +141,12 @@
     <label>Spotify Client ID</label><input type="text" id="cSpotify" autocapitalize="off" autocorrect="off">
     <label>ElevenLabs API key</label><input type="password" id="cEleven">
     <label>ElevenLabs Voice ID</label><input type="text" id="cVoice" autocapitalize="off" autocorrect="off">
+    <label>ElevenLabs model</label>
+    <select id="cModel" style="width:100%">
+      <option value="eleven_v4">Eleven v4 (most expressive)</option>
+      <option value="eleven_v4_turbo">Eleven v4 Turbo (faster)</option>
+      <option value="eleven_multilingual_v2">Multilingual v2 (older)</option>
+    </select>
     <label>Gemini API key (writes the DJ lines)</label><input type="password" id="cGemini">
     <label>Town (like: Yakima, Washington)</label><input type="text" id="cCity">
     <label>How the DJ shares the speakers with Spotify</label>
@@ -171,7 +204,8 @@ const DEFAULT_CFG = {
   spotifyClientId: '', elevenKey: '', elevenVoice: '', geminiKey: '',
   city: 'Yakima, Washington', lat: 46.60, lon: -120.51, djName: 'Cara',
   breakMin: 2, breakMax: 5, breakingEnabled: true, breakingTest: false,
-  elevenModel: 'eleven_multilingual_v2', audioMode: 'solo', boost: 1,
+  elevenModel: 'eleven_v4', audioMode: 'classic', boost: 1,
+  mood: 'normal', stingerVol: 80, stingerChance: 50,
 };
 let cfg = { ...DEFAULT_CFG };
 try { cfg = { ...DEFAULT_CFG, ...JSON.parse(localStorage.getItem('cara_cfg') || '{}') }; } catch (e) {}
@@ -184,6 +218,55 @@ const DJ_STYLE =
   "begging listeners to cheer up, quit moping and dance, asks the odd rhetorical question, and talks in " +
   "short punchy fragments. She adores radio, hypes the station as 'Non Stop Pop', and keeps every break " +
   "clean (no swearing) and very short and punchy";
+const CARA_GUIDE = `How this DJ's comedy works (write in this spirit, but never copy real lines from any show or game):
+- Bubbly and bossy on the surface, a little jaded underneath. She orders the listener to be happy, then undercuts it with a dry, very specific observation.
+- Favourite targets: phone and social-media addiction, comment sections, selfies, wellness and diet trends, therapy and pills as a lifestyle, celebrity and fame culture, actors, music snobs who think they are too cool, and the quirks of the town she broadcasts from (tease it gently, without stating specific facts you were not given).
+- Shape of a joke: a quick setup, one or two absurdly specific details, then a deflating punchline or a self-aware aside about herself or her radio job.
+- She begs and pleads ("please?") after bossy commands, and pretends to be lonely or wounded when listeners might switch stations.
+- Light British flavour ("rubbish", "proper", "a bit mad", "lovely", "adverts", comparing things to back home in England). Stay clean, no swearing.
+- Song intros are quick: say the artist and song plainly (a fact like the year or where they are from is welcome), then ONE short quip about the title, the band name or the genre.
+- Now and then she trails off with "...", asks a rhetorical question, or confesses something silly about herself.
+- Cynical observation is fine, but always land back on: dance, be happy, stop taking everything so seriously.
+- Show reactions as spoken words, like a sigh ("Ugh.") or a laugh ("Ha!"), never as stage directions.`;
+const timeOfDay = () => { const h = new Date().getHours(); return h < 5 ? 'late night' : h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'; };
+const MOOD_HINTS = {
+  chill: "Mood: CHILL. Laid-back, smooth and warm, like a late-night host who's had a great day. Still upbeat, but relaxed: fewer exclamation marks, gentle dry humor, a little shorter than usual. Never sleepy or bored.",
+  unhinged: "Mood: UNHINGED. Maximum chaos and drama: big dramatic reactions, absurd exaggerated reactions, mock outrage, wildly over-the-top hyperbole, dramatic beats with '...'. Big, gleeful, slightly out of control. Still only the given facts, still clean, still short.",
+};
+const currentMood = () => cfg.mood === 'mixed' ? pick(['chill', 'normal', 'unhinged']) : (cfg.mood || 'normal');
+
+const wikiCache = new Map();
+const MUSIC_WORDS = ['singer', 'band', 'rapper', 'musician', 'songwriter', 'duo', 'group', 'vocalist', 'record producer', 'composer', 'artist', 'song', 'single'];
+async function wikiLookup(query, must) {
+  if (wikiCache.has(query)) return wikiCache.get(query);
+  let result = null;
+  try {
+    const url = 'https://en.wikipedia.org/w/api.php?origin=*&action=query&format=json&generator=search&gsrlimit=4&prop=extracts&exintro=1&explaintext=1&exsentences=7&redirects=1&gsrsearch=' + encodeURIComponent(query);
+    const r = await fetchTimeout(url, {}, 8000);
+    const j = await r.json();
+    const pages = Object.values((j.query || {}).pages || {}).sort((a, b) => (a.index || 99) - (b.index || 99));
+    for (const pg of pages) {
+      const ext = (pg.extract || '').trim(), low = ext.toLowerCase();
+      if (ext.length > 80 && must.every(m => low.includes(m.toLowerCase())) && MUSIC_WORDS.some(w => low.includes(w))) { result = ext; break; }
+    }
+  } catch (e) { log('Trivia lookup failed: ' + e.message); }
+  wikiCache.set(query, result);
+  return result;
+}
+async function getTrivia(info) {
+  if (!info) return null;
+  const clean = info.title.replace(/\s*[\(\[-].*$/, '').trim() || info.title;
+  let t = await wikiLookup(`"${clean}" ${info.artist} song`, [clean, info.artist.split(' ')[0]]);
+  if (t) return { subject: `the song "${info.title}" by ${info.artist}`, text: t };
+  t = await wikiLookup(`${info.artist} musician band singer`, [info.artist]);
+  return t ? { subject: info.artist, text: t } : null;
+}
+async function triviaFacts(info, when) {
+  const t = await getTrivia(info);
+  if (!t) return null;
+  return `${when} song is "${info.title}" by ${info.artist}. Here is real background on ${t.subject} (from Wikipedia): \"\"\"${t.text}\"\"\" Share exactly ONE interesting, specific fun fact taken ONLY from that text, in your own words, like you just remembered it. Never add anything that is not in the text, and never guess. Skip anything sad, dark or about deaths, scandals or lawsuits.`;
+}
+
 const GEMINI_MODELS = ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.5-flash'];
 const NOT_MUSIC_HINTS = ['cara', 'non stop pop', 'non-stop', 'advert', 'commercial', 'sponsor', 'jingle'];
 
@@ -431,6 +514,11 @@ async function topicFacts(label, ctx) {
   if (label === 'world') { const h = await getHeadlines(WORLD_FEEDS); return h.length ? `One wild story from somewhere in the world (NOT from ${cfg.city}, so don't say it happened here): ` + pick(h) : null; }
   if (label === 'gossip') { const h = await getHeadlines(GOSSIP_FEEDS, GOSSIP_SKIP); return h.length ? "A celebrity / pop culture story (say ONLY what the headline says, add no rumours or extra claims, and tease affectionately: never mock anyone's looks, body or private life): " + pick(h) : null; }
   if (label === 'music') { const h = await getHeadlines(MUSIC_FEEDS, GOSSIP_SKIP); return h.length ? 'A music industry story (say ONLY what the headline says, add no extra claims): ' + pick(h) : null; }
+  if (label === 'trivia') {
+    let f = ctx.next ? await triviaFacts(ctx.next, 'The NEXT') : null;
+    if (!f && ctx.last) f = await triviaFacts(ctx.last, 'The song that JUST played');
+    return f;
+  }
   if (label === 'artist_next') return ctx.next ? songFacts(ctx.next, 'The NEXT') : null;
   if (label === 'artist_last') return ctx.last ? songFacts(ctx.last, 'The song that JUST played') : null;
   if (label === 'time') return 'The time is ' + new Date().toLocaleString('en-US', { weekday: 'long', hour: 'numeric', minute: '2-digit' });
@@ -440,6 +528,7 @@ async function pickTopic(ctx) {
   let pool = [['news', 4], ['world', 3], ['gossip', 3], ['music', 3], ['weather', 2], ['time', 1]];
   if (ctx.next) pool.push(['artist_next', 4]);
   if (ctx.last) pool.push(['artist_last', 2]);
+  if (ctx.next || ctx.last) pool.push(['trivia', 5]);
   while (pool.length) {
     const label = weighted(pool);
     const facts = await topicFacts(label, ctx);
@@ -465,12 +554,17 @@ async function gemini(prompt) {
 }
 async function writeBreak(style, topic, ctx) {
   const next = describe(ctx.next);
+  const mood = currentMood(); log(`[mood: ${mood}]`);
   const prompt = `You are ${cfg.djName}, ${DJ_STYLE}, on a non-stop pop station in ${cfg.city}.
 Write a spoken break of 15-35 words: TWO or THREE short, snappy sentences, max.
 Situation: ${STYLE_HINTS[style]}
+${MOOD_HINTS[mood] || ''}
+${/^eleven_v[34]/.test(cfg.elevenModel) ? 'Voice tags: this voice model understands a few spoken-emotion tags written in square brackets. You may use at most two per break, only where they really fit, chosen from [laughing], [sighs], [excited]. Put a tag mid-sentence right before the words it applies to, never as the very first thing in the break. Never open a break with a gasp, a sigh, Ooh, Oh or Ah: start with a real word or the topic itself. Never invent other tags, never use tags in place of words.' : ''}
 This break is about ONLY this one thing (do not add other topics): ${topic.facts}
-Keep it punchy like a quick radio drop-in: a gasp or a bit of shade, a quick reaction, done.
+Keep it punchy like a quick radio drop-in: a bit of shade, a quick reaction, done.
 Your comedic habits (use one or two per break, never all): a cheerful command followed by a dry, deadpan jab; mock-pleading ("please", "I'm begging you"); a rhetorical question; gently teasing the listener or the town; a wry aside about phones, social media, or being too cool for pop.
+${CARA_GUIDE}
+It's ${timeOfDay()} where you are, so you can nod to that if it fits.
 Rules:
 - Only use the facts given above. Never invent news, names or numbers, but you may react to them with over-the-top drama. If it's a headline, actually tell listeners what it says, in your own words, then react.
 - Write for the ear: contractions, sentence fragments, a natural "ugh" or "okay", and dashes or commas where a real person would pause. Never sound like a press release.
@@ -493,7 +587,15 @@ function templateBreak(style, topic, ctx) {
     ? [`Whoa, where did the music go?! It's just me, ${n}, and I am thrilled about it!`, `Hello, ${cfg.city}, it's me, ${n}, live and loud!`]
     : [`Oh my gosh, hi! ${n} here, Non Stop Pop!`, `Ooh, hold on, it's ${n}, and I have news!`];
   const fact = topic.facts.replace(/^[^:]*:\s*/, '').replace(/\. (Hype|Recent).*$/, '');
-  const middle = topic.label === 'time' ? `It's ${fact.replace('The time is ', '')}, and everybody should be dancing!`
+  let triviaLine = null;
+  if (topic.label === 'trivia') {
+    const m = topic.facts.match(/"""([\s\S]*?)"""/);
+    const who = (ctx.next || ctx.last || {}).artist || 'this artist';
+    const sents = m ? m[1].replace(/\s*\([^)]*\)/g, '').split(/(?<=[.!?])\s+/).slice(1).filter(x => x.length > 40 && x.length < 200 && !/died|death|killed|arrest|lawsuit|abuse|suicide|overdose/i.test(x)) : [];
+    if (sents.length) triviaLine = `${pick([`Fun fact about ${who}:`, 'Music trivia, darlings!'])} ${pick(sents)} Iconic!`;
+  }
+  const middle = triviaLine ? triviaLine : topic.label === 'trivia' ? `Up next on Non Stop Pop, and you will NOT sit down!`
+               : topic.label === 'time' ? `It's ${fact.replace('The time is ', '')}, and everybody should be dancing!`
                : topic.label === 'artist_next' && ctx.next ? `Up next, ${ctx.next.artist}, with ${ctx.next.title}! Absolutely iconic!`
                : topic.label === 'artist_last' && ctx.last ? `That was ${ctx.last.artist} with ${ctx.last.title}! Chef's kiss!`
                : topic.label === 'weather' ? fact.replace('Current weather in town', 'Weather check') + '!'
@@ -532,6 +634,44 @@ function applyBoost() {
     if (actx.state !== 'running') actx.resume();
   } catch (e) { log('Voice boost is not available: ' + e.message); }
 }
+// Your own stinger recordings (the stingers folder next to this page), played through WebAudio so the volume slider works on iPhone
+const STINGER_FILES = ['stingers/djstinger_1.mp3', 'stingers/djstinger_2.mp3', 'stingers/djstinger_3.mp3',
+                       'stingers/djstinger_4.mp3', 'stingers/djstinger_5.mp3', 'stingers/djstinger_6.mp3'];
+let sctx = null, sgain = null, stingers = [], lastSting = -1;
+async function loadStingers() {
+  try {
+    if (!sctx) {
+      sctx = new (window.AudioContext || window.webkitAudioContext)();
+      sgain = sctx.createGain(); sgain.connect(sctx.destination);
+    }
+    if (sctx.state !== 'running') await sctx.resume();
+    if (stingers.length) return;
+    for (const f of STINGER_FILES) {
+      try {
+        const r = await fetchTimeout(f, {}, 15000);
+        if (!r.ok) continue;
+        stingers.push(await sctx.decodeAudioData(await r.arrayBuffer()));
+      } catch (e) {}
+    }
+    log(stingers.length ? `Stingers loaded: ${stingers.length}.` : 'No stingers found. Upload the stingers folder next to index.html.');
+  } catch (e) { log('Stingers are not available: ' + e.message); }
+}
+function setStingVol() { if (sgain) sgain.gain.value = Math.max(0, Math.min(1, (+cfg.stingerVol || 0) / 100)) * 1.5; }
+function playStinger() {
+  return new Promise(resolve => {
+    if (!sctx || !stingers.length) return resolve();
+    let i; do { i = randInt(0, stingers.length - 1); } while (stingers.length > 1 && i === lastSting);
+    lastSting = i;
+    try {
+      setAudioType(); setStingVol();
+      if (sctx.state !== 'running') sctx.resume();
+      const src = sctx.createBufferSource(); src.buffer = stingers[i]; src.connect(sgain);
+      const guard = setTimeout(resolve, stingers[i].duration * 1000 + 3000);
+      src.onended = () => { clearTimeout(guard); resolve(); };
+      src.start();
+    } catch (e) { log('Stinger failed: ' + e.message); resolve(); }
+  });
+}
 const silentWav = () => wavUrl(new Float32Array(2205), 22050);
 function wavUrl(samples, sr) {
   const buf = new ArrayBuffer(44 + samples.length * 2), v = new DataView(buf);
@@ -560,7 +700,8 @@ async function synth(text) {
       const r = await fetchTimeout(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(cfg.elevenVoice)}?output_format=mp3_44100_128`, {
         method: 'POST', headers: { 'xi-api-key': cfg.elevenKey, 'Content-Type': 'application/json' },
         body: JSON.stringify({ text, model_id: cfg.elevenModel,
-          voice_settings: { stability: 0.35, similarity_boost: 0.8, style: 0.4, use_speaker_boost: true, speed: 1.05 } }) }, 25000);
+          voice_settings: /^eleven_v[34]/.test(cfg.elevenModel) ? { stability: 0.25, similarity_boost: 1.0 }
+            : { stability: 0.35, similarity_boost: 0.8, style: 0.4, use_speaker_boost: true, speed: 1.05 } }) }, 25000);
       if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 100));
       log(`ElevenLabs voice OK (${text.length} characters used)`);
       return { url: URL.createObjectURL(await r.blob()), text };
@@ -620,7 +761,7 @@ Rules:
 // ---------------------------------------------------------------- the DJ engine
 const run = { on: false, busy: false, lock: false, wake: null, lastPoll: 0, lastUri: null,
   songsSince: 0, nextAfter: 3, lastStyle: null, prepared: null, building: false,
-  brk: null, brkBuilding: false, songsSinceBrk: 999, forceBreak: false, forceBrk: false, volumeBroken: false };
+  brk: null, brkBuilding: false, songsSinceBrk: 999, force: null, forceBreak: false, forceBrk: false, volumeBroken: false };
 
 function rollInterval() {
   const lo = Math.max(1, cfg.breakMin | 0), hi = Math.max(lo, cfg.breakMax | 0);
@@ -652,6 +793,7 @@ async function interrupt(clip, opts = {}) {
     }
     if (!mixing && !solo) await spPause();
     if (opts.chime) await playClip({ url: chimeUrl() });
+    if (opts.sting) { log('[stinger before ' + cfg.djName + ']'); await playStinger(); await sleep(150); }
     await playClip(clip);
     if (restoreVol !== null) { await spVolume(restoreVol); restoreVol = null; }
     if (mixing) { await sleep(500); await ensureMusic(); }
@@ -703,6 +845,13 @@ async function buildBreaking(uri, atMs, forced) {
   } catch (e) { log('Could not build breaking news: ' + e.message); run.brk = null; }
   finally { run.brkBuilding = false; }
 }
+function dropPrepared() { if (run.prepared && run.prepared.clip && run.prepared.clip.url) URL.revokeObjectURL(run.prepared.clip.url); run.prepared = null; }
+function queueStyle(k) {
+  const mix = keepsMusicPlaying();
+  if (k === 'a') return mix ? 'talkover' : 'silent';
+  if (k === 'b') return mix ? 'early' : 'outro';
+  return 'intro';
+}
 function dropBreaking() { if (run.brk && run.brk.clip && run.brk.clip.url) URL.revokeObjectURL(run.brk.clip.url); run.brk = null; }
 
 function onNewSong() {
@@ -737,7 +886,8 @@ async function tick() {
     }
     if (!run.on || !state.playing || remaining === null) return;
     const progress = state.duration - remaining;
-    const due = run.songsSince >= run.nextAfter;
+    const due = run.songsSince >= run.nextAfter || !!run.force;
+    if (run.force && run.prepared && run.prepared.style !== run.force) { dropPrepared(); }
 
     // test buttons
     if (run.forceBreak && !run.building) { run.forceBreak = false; log('Testing a DJ break...'); buildBreak(keepsMusicPlaying() ? 'talkover' : 'outro', true); return; }
@@ -755,8 +905,8 @@ async function tick() {
     }
 
     // regular break: write it ahead of time, then run it at the right moment
-    if (due && !run.prepared && !run.building && remaining < 45000) {
-      const style = pickStyle(run.lastStyle);
+    if (due && !run.prepared && !run.building && (remaining < 90000 || run.force)) {
+      const style = run.force || pickStyle(run.lastStyle);
       buildBreak(style, false);
     }
     if (due && run.prepared) {
@@ -764,13 +914,14 @@ async function tick() {
       let go = false;
       if (p.style === 'silent') go = state.uri === p.forUri && remaining <= p.pauseMs;
       else if (p.style === 'outro') go = state.uri === p.forUri && remaining <= p.outroMs;
-      else if (p.style === 'talkover') go = state.uri === p.forUri && remaining <= p.talkMs;
+      else if (p.style === 'talkover') go = state.uri === p.forUri ? remaining <= p.talkMs : progress >= 1200;   // late clip: talk over the start of the next song
       else if (p.style === 'early') go = state.uri === p.forUri && remaining <= p.earlyMs;
       else go = state.uri !== p.forUri && progress >= p.introAt;      // intro: after the next song starts
       if (go) {
-        run.prepared = null; run.songsSince = 0; run.lastStyle = p.style; run.nextAfter = rollInterval();
+        run.prepared = null; run.songsSince = 0; run.lastStyle = p.style; run.nextAfter = rollInterval(); run.force = null;
         log(`[transition: ${p.style}]`);
-        await interrupt(p.clip, p.style === 'silent' ? { skipToNext: true, uri: state.uri } : {});
+        const sting = p.style === 'silent' && stingers.length && Math.random() * 100 < (+cfg.stingerChance || 0);
+        await interrupt(p.clip, p.style === 'silent' ? { skipToNext: true, uri: state.uri, sting } : {});
       } else if (p.style !== 'intro' && state.uri !== p.forUri) {
         run.prepared = null;               // missed its moment (the song changed); it will be rebuilt
         if (p.clip.url) URL.revokeObjectURL(p.clip.url);
@@ -794,7 +945,8 @@ async function startDJ() {
   setAudioType(); applyBoost();
   // iOS only lets a page play sound after a tap, so unlock the audio right now
   try { const a = $('voice'); a.src = silentWav(); a.play().catch(() => {}); } catch (e) {}
-  run.on = true; run.songsSince = 0; run.lastUri = null; run.prepared = null; run.lastStyle = null;
+  loadStingers();
+  run.on = true; run.force = null; run.songsSince = 0; run.lastUri = null; run.prepared = null; run.lastStyle = null;
   run.nextAfter = rollInterval();
   keepAwake();
   log('Keep this page open with the screen on. Music keeps playing in the Spotify app.');
@@ -822,6 +974,9 @@ function render() {
     $('prog').style.width = '0'; $('tl').textContent = '0:00'; $('tr').textContent = '0:00';
   }
   $('connect').style.display = (!tok && cfg.spotifyClientId) ? 'block' : 'none';
+  const mixNow = keepsMusicPlaying();
+  $('q1').textContent = mixNow ? 'Talk over' : 'Silent'; $('q2').textContent = mixNow ? 'Early' : 'Outro';
+  ['q1', 'q2', 'q3'].forEach((id, i) => $(id).style.outline = (run.force && run.force === queueStyle('abc'[i])) ? '2px solid #1db954' : 'none');
   $('djbtn').textContent = run.on ? 'STOP DJ' : 'START DJ';
   $('djbtn').classList.toggle('live', run.on);
   $('status').textContent = run.on ? (run.busy ? 'DJ is talking...' : 'DJ is live') : 'DJ is off';
@@ -829,13 +984,13 @@ function render() {
 function openSettings() {
   $('ruri').textContent = redirectUri();
   $('cSpotify').value = cfg.spotifyClientId; $('cEleven').value = cfg.elevenKey; $('cVoice').value = cfg.elevenVoice;
-  $('cGemini').value = cfg.geminiKey; $('cCity').value = cfg.city; $('cAudio').value = cfg.audioMode; $('cBoost').value = String(cfg.boost);
+  $('cGemini').value = cfg.geminiKey; $('cCity').value = cfg.city; $('cAudio').value = cfg.audioMode; $('cModel').value = cfg.elevenModel; $('cBoost').value = String(cfg.boost);
   $('modal').classList.add('open');
 }
 async function saveSettings() {
   cfg.spotifyClientId = $('cSpotify').value.trim(); cfg.elevenKey = $('cEleven').value.trim();
   cfg.elevenVoice = $('cVoice').value.trim(); cfg.geminiKey = $('cGemini').value.trim();
-  cfg.audioMode = $('cAudio').value; cfg.boost = +$('cBoost').value || 1; run.volumeBroken = false;
+  cfg.elevenModel = $('cModel').value || 'eleven_v4'; cfg.audioMode = $('cAudio').value; cfg.boost = +$('cBoost').value || 1; run.volumeBroken = false;
   const city = $('cCity').value.trim() || DEFAULT_CFG.city;
   if (city !== cfg.city) {
     cfg.city = city;
@@ -851,13 +1006,22 @@ function readOptions() {
   if (!(lo >= 1)) lo = cfg.breakMin; if (!(hi >= 1)) hi = cfg.breakMax;
   cfg.breakMin = Math.min(lo, hi); cfg.breakMax = Math.max(lo, hi);
   cfg.breakingEnabled = $('brkOn').checked; cfg.breakingTest = $('brkTest').checked;
+  cfg.mood = $('mood').value;
+  const sc = parseInt($('stChance').value, 10); if (sc >= 0 && sc <= 100) cfg.stingerChance = sc;
+  cfg.stingerVol = +$('stVol').value; setStingVol();
   saveCfg();
 }
 
 async function init() {
   $('bmin').value = cfg.breakMin; $('bmax').value = cfg.breakMax;
   $('brkOn').checked = cfg.breakingEnabled; $('brkTest').checked = cfg.breakingTest;
-  ['bmin', 'bmax', 'brkOn', 'brkTest'].forEach(id => $(id).addEventListener('change', readOptions));
+  $('mood').value = cfg.mood; $('stChance').value = cfg.stingerChance; $('stVol').value = cfg.stingerVol;
+  ['q1', 'q2', 'q3'].forEach((id, i) => $(id).onclick = () => {
+    if (!run.on || !state.playing) { alert('Start the DJ and play a song first.'); return; }
+    run.force = queueStyle('abc'[i]); log(`Queued: ${run.force} transition, coming up at the end of this song.`);
+  });
+  $('testSting').onclick = async () => { await loadStingers(); await playStinger(); };
+  ['bmin', 'bmax', 'brkOn', 'brkTest', 'mood', 'stChance', 'stVol'].forEach(id => $(id).addEventListener('change', readOptions));
   $('openSettings').onclick = openSettings; $('closeCfg').onclick = () => $('modal').classList.remove('open');
   $('saveCfg').onclick = saveSettings; $('connect').onclick = startLogin;
   $('wake').onclick = () => { location.href = 'spotify://'; };
