@@ -47,7 +47,7 @@
   .titlerow { display:flex; align-items:flex-end; gap:8px; }
   .tt { flex:1; min-width:0; text-shadow:0 0 6px rgba(0,0,0,.5); }
   #song { font-size:18px; font-weight:700; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; }
-  #artist { font-size:14px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
+  #artist { font-size:14px; color:var(--muted); display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; overflow-wrap:anywhere; margin-top:2px; }
   .circ { width:30px; height:30px; border-radius:50%; background:var(--btn); -webkit-backdrop-filter:blur(14px); backdrop-filter:blur(14px); display:flex; align-items:center; justify-content:center; flex:none; }
   .circ .ic { width:15px; height:15px; }
   #djbtn.live { background:#fff; color:#000; }
@@ -532,13 +532,15 @@ async function sp(method, path, body, retry = true) {
   if (body) headers['Content-Type'] = 'application/json';
   const r = await fetchTimeout('https://api.spotify.com/v1' + path, { method, headers, body: body ? JSON.stringify(body) : undefined }, 10000);
   if (r.status === 401 && retry) { tok.exp = 0; return sp(method, path, body, false); }
-  if (r.status === 429) { await sleep((+r.headers.get('retry-after') || 2) * 1000); return sp(method, path, body, false); }
+  const ra = +r.headers.get('retry-after') || 0;
+  if (r.status === 429 && retry && ra <= 5) { await sleep((ra || 2) * 1000); return sp(method, path, body, false); }
+  if (r.status === 429) { state.retryAfter = ra; }
   let data = null; if (r.status !== 204) { try { data = await r.json(); } catch (e) {} }
-  return { ok: r.ok, status: r.status, data };
+  return { ok: r.ok, status: r.status, data, retryAfter: ra };
 }
 
 // ---------------------------------------------------------------- player state
-const state = { connected: false, hasItem: false, playing: false, uri: null, name: '', artist: '', track: null,
+const state = { apiStatus: 0, retryAfter: 0, connected: false, hasItem: false, playing: false, uri: null, name: '', artist: '', track: null,
                 duration: 0, progress: 0, stamp: 0, deviceId: null, volume: null, supportsVolume: null,
                 art: '', deviceName: '', shuffle: false, repeat: 'off' };
 const devQ = () => state.deviceId ? '?device_id=' + encodeURIComponent(state.deviceId) : '';
@@ -585,10 +587,22 @@ function trackInfo(item) {
   if (NOT_MUSIC_HINTS.some(h => blob.includes(h))) return null;
   return { title: item.name, artist: artists[0], album: album.name || '', year: (album.release_date || '').slice(0, 4) };
 }
+function apiMsg() {
+  const s = state.apiStatus;
+  if (s === 429) { const m = state.retryAfter ? Math.ceil(state.retryAfter / 60) : 0; return 'RATE LIMITED (429). Spotify is telling this app to slow down' + (m ? ' - try again in about ' + (m > 90 ? Math.round(m / 60) + ' hours' : m + ' minutes') : '') + '.'; }
+  if (s === 403) return 'ACCESS DENIED (403). Your Spotify email is not in User Management on the developer dashboard, or Spotify is having a glitch.';
+  if (s === 401) return 'LOGIN EXPIRED (401). Tap Connect Spotify again.';
+  if (s === 204) return 'Connected, but Spotify sees nothing playing. Start a song in the Spotify app.';
+  if (s >= 500) return 'Spotify is having trouble (' + s + '). Try again in a few minutes.';
+  if (s === 0 || s === undefined) return '';
+  if (s >= 400) return 'Spotify error ' + s + '.';
+  return '';
+}
 async function poll() {
   const t0 = Date.now();
   const r = await sp('GET', '/me/player?additional_types=track,episode');
   const t1 = Date.now();
+  if (r.status !== state.apiStatus) { state.apiStatus = r.status; const m = apiMsg(); if (m) log('Spotify: ' + m); }
   if (!r.ok || !r.data || !r.data.item) { state.hasItem = false; state.playing = false; return; }
   const pb = r.data, item = pb.item;
   Object.assign(state, {
@@ -1191,7 +1205,7 @@ function render() {
   const has = !!tok && state.hasItem;
   $('song').textContent = !tok ? 'Not connected' : has ? state.name : 'Nothing playing';
   $('artist').textContent = !tok ? (cfg.spotifyClientId ? 'Tap Connect Spotify.' : 'Open the DJ options (the three dots) to add your keys.')
-    : has ? state.artist : 'Start a playlist in the Spotify app.';
+    : has ? state.artist : (apiMsg() || 'Start a playlist in the Spotify app.');
   const dur = has ? Math.max(state.duration, 1) : 1;
   const prog = has ? Math.min(dur, state.progress + (state.playing ? Date.now() - state.stamp : 0)) : 0;
   const frac = dragFrac != null ? dragFrac : prog / dur;
