@@ -527,14 +527,16 @@ async function getAccess() {
   if (tok.exp - 60000 < Date.now()) await tokenRequest({ grant_type: 'refresh_token', refresh_token: tok.refresh });
   return tok.access;
 }
+const rl = { until: 0 };      // when Spotify said "slow down", stay quiet until this time
 async function sp(method, path, body, retry = true) {
+  if (Date.now() < rl.until) { state.retryAfter = Math.ceil((rl.until - Date.now()) / 1000); return { ok: false, status: 429, data: null, retryAfter: state.retryAfter }; }
   const headers = { Authorization: 'Bearer ' + await getAccess() };
   if (body) headers['Content-Type'] = 'application/json';
   const r = await fetchTimeout('https://api.spotify.com/v1' + path, { method, headers, body: body ? JSON.stringify(body) : undefined }, 10000);
   if (r.status === 401 && retry) { tok.exp = 0; return sp(method, path, body, false); }
   const ra = +r.headers.get('retry-after') || 0;
   if (r.status === 429 && retry && ra <= 5) { await sleep((ra || 2) * 1000); return sp(method, path, body, false); }
-  if (r.status === 429) { state.retryAfter = ra; }
+  if (r.status === 429) { state.retryAfter = ra; rl.until = Date.now() + Math.min(Math.max(ra, 45), 600) * 1000; }
   let data = null; if (r.status !== 204) { try { data = await r.json(); } catch (e) {} }
   return { ok: r.ok, status: r.status, data, retryAfter: ra };
 }
@@ -1006,11 +1008,12 @@ async function tick() {
   run.lock = true;
   try {
     if (!state.connected && !tok) return;
+    if (document.hidden && !run.on) return;       // nobody is looking: don't bother Spotify
     const now = Date.now();
     const remainingEst = () => state.playing ? state.duration - (state.progress + (Date.now() - state.stamp)) : null;
     let remaining = remainingEst();
-    const near = run.on && remaining !== null && (remaining < 15000 || (run.prepared && run.prepared.style === 'intro'));
-    const interval = near ? 900 : (run.on ? 2500 : 4000);
+    const near = run.on && remaining !== null && (remaining < 12000 || (run.prepared && run.prepared.style === 'intro'));
+    const interval = near ? 1200 : (run.on ? 6000 : 12000);
     if (now - run.lastPoll >= interval) {
       run.lastPoll = now;
       try { await poll(); state.connected = true; } catch (e) { log('Spotify error: ' + e.message); return; }
