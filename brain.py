@@ -342,7 +342,117 @@ def gemini(prompt):
     return None
 
 
-def fresh_draft(prompt, skip):
+# ---------------------------------------------------------------- reading the room
+# Now and then a DJ makes one quick, playful guess about the listener from the song they picked
+# ("Who hurt you, Yakima?"), going by its title and what its lyrics are about. The lyrics come from
+# LRCLIB, once per song, and are never read out or quoted.
+_LYRICS = {}
+_LYRICS_LOCK = threading.Lock()
+
+
+def song_lyrics(info):
+    """A song's lyrics as plain text ("" when there are none)."""
+    if not info or not info.get("title"):
+        return ""
+    key = info["title"] + "|" + (info.get("artist") or "")
+    with _LYRICS_LOCK:
+        if key in _LYRICS:
+            return _LYRICS[key]
+    synced = plain = ""
+    try:
+        q = {"track_name": info["title"], "artist_name": info.get("artist") or ""}
+        if info.get("album"):
+            q["album_name"] = info["album"]
+        r = requests.get("https://lrclib.net/api/get", params=q, timeout=8,
+                         headers={"User-Agent": "NonStopPopDJ (https://github.com/frankfigueroa1999-del/cara-dj)"})
+        if r.ok:
+            j = r.json()
+            synced, plain = j.get("syncedLyrics") or "", j.get("plainLyrics") or ""
+        if not synced and not plain:
+            r = requests.get("https://lrclib.net/api/search", params={"track_name": info["title"], "artist_name": info.get("artist") or ""}, timeout=8,
+                             headers={"User-Agent": "NonStopPopDJ (https://github.com/frankfigueroa1999-del/cara-dj)"})
+            if r.ok:
+                for item in r.json() or []:
+                    if item.get("plainLyrics"):
+                        plain = item["plainLyrics"]
+                        break
+                    if not synced and item.get("syncedLyrics"):
+                        synced = item["syncedLyrics"]
+    except Exception as e:
+        print(f"[lyrics lookup failed: {e}]")
+        return ""          # not cached, so the next break can try again
+    if not plain and synced:
+        plain = "\n".join(re.sub(r"^(\[[^\]]*\])+", "", l).strip() for l in synced.splitlines())
+    plain = "\n".join(l.strip() for l in plain.splitlines() if l.strip())
+    with _LYRICS_LOCK:
+        if len(_LYRICS) > 200:
+            _LYRICS.clear()
+        _LYRICS[key] = plain
+    return plain
+
+
+def song_read(info):
+    """The song the listener picked, and what it's about. None when there's no song to read."""
+    if not info or not info.get("title"):
+        return None
+    full = song_lyrics(info)
+    if full and mentions_death(full):
+        full = ""          # a heavy song: they go on the title alone
+    excerpt = " / ".join(full.splitlines())[:900] if full else ""
+    return {"info": info, "lyrics": full, "excerpt": excerpt}
+
+
+def town_name():
+    city = getattr(dj, "CITY", "Yakima, Washington")
+    return city.split(",")[0].strip() or city
+
+
+def read_block(r, which, duo=False):
+    """What the prompt says when they read the room. `which` is "the song that just played", "the song that's starting" and so on."""
+    town = town_name()
+    i = r["info"]
+    song = f'"{i["title"]}" by {i.get("artist") or "someone"}'
+    who = "One of them opens" if duo else "Open"
+    after = "the other piles on or sticks up for them, then they move on" if duo else "then move straight on"
+    s = (f"\n- Read the room: the listener picked {which}, {song}. {who} with ONE quick, playful jab about what that choice says about them, "
+         f"going by the title and what the song's about (a heartbreak song: \"Who hurt you, {town}?\"; a revenge anthem: \"Remind me never to cross you\"; "
+         f"a love song: \"Somebody's got a crush\"; a hype song: \"Somebody's feeling dangerous today\"), in brand-new words; {after}.")
+    s += ("\n- Keep the read light and affectionate, like a friend clocking your playlist: love life, mood, being in your feelings, main-character energy, "
+          "harmless mischief. Never guess at anything heavy or personal (mental health, drinking or drugs, money trouble, bodies, anything sexual).")
+    if r["excerpt"]:
+        s += f"\n- What the song's about, from its lyrics (only so you know; never quote, sing or closely paraphrase a line): {r['excerpt']}"
+    return s
+
+
+def quotes_lyrics(text, lyrics, title):
+    """True when a draft quotes the song: five words in a row from its lyrics (the title doesn't count)."""
+    lw, w = words(lyrics), words(text)
+    if len(lw) < 5 or len(w) < 5:
+        return False
+    grams = {" ".join(lw[i:i + 5]) for i in range(len(lw) - 4)}
+    in_title = " " + " ".join(words(title)) + " "
+    for i in range(len(w) - 4):
+        g = w[i:i + 5]
+        if all(x in STOP_WORDS for x in g):
+            continue
+        j = " ".join(g)
+        if j in grams and f" {j} " not in in_title:
+            return True
+    return False
+
+
+def time_to_read():
+    """Whether this break reads the room: about 3 in 10, never two in a row."""
+    return random.random() < 0.3 and "read" not in MEM.last("openings", 2) and "read" not in MEM.last("popins", 1)
+
+
+def read_which(style, ctx):
+    if style == "intro":
+        return "the song that's starting"
+    return "the song that just played" if ctx.get("last") else "the song coming up next"
+
+
+def fresh_draft(prompt, skip, read=None):
     """Asks Gemini, checks the draft against her memory and rules, rewrites up to twice."""
     feedback, best = "", None
     for attempt in range(3):
@@ -352,6 +462,10 @@ def fresh_draft(prompt, skip):
             break
         text, used = clean_tags(tidy(raw), set(TAGS))
         if not text:
+            continue
+        if read and read["lyrics"] and quotes_lyrics(text, read["lyrics"], read["info"]["title"]):
+            print(f"[rewrite {attempt + 1}: quoted the lyrics]")
+            feedback = "It quoted the song's lyrics. Never quote them: react to what the song's about in your own words."
             continue
         why = problem(text, MEM.recent, skip)
         if why:
@@ -876,7 +990,12 @@ def write_break(style, ctx):
     have_song = bool(ctx.get("next") or ctx.get("last"))
     opens = [o for o in OPENINGS if o[0] not in MEM.last("openings", 8)
              and (o[2] != "song" or have_song) and (o[2] != "last" or ctx.get("last"))]
-    opening = random.choice(opens or OPENINGS)
+    # now and then she reads the room: one quick jab about what the listener's song says about them, then on with the break
+    read = song_read(ctx.get("next") if style == "intro" else (ctx.get("last") or ctx.get("next"))) if time_to_read() else None
+    opening = ["read", "Open by reading the room (see below).", ""] if read else random.choice(opens or OPENINGS)
+    room_line = read_block(read, read_which(style, ctx)) if read else ""
+    if read:
+        print(f"[reading the room: {read['info']['title']}{'' if read['lyrics'] else ', title only'}]")
     ending = random.choice([e for e in ENDINGS if e not in MEM.last("endings", 5)] or ENDINGS)
     tag_choices = random.sample([t for t in TAGS if t not in MEM.last("tags", 4)] or TAGS, 2)
     lo, hi = word_range(style)
@@ -895,7 +1014,7 @@ def write_break(style, ctx):
 THIS BREAK
 - What's happening: {SITUATIONS.get(style, SITUATIONS['talkover'])}{switch_line}
 - Length: {lo} to {hi} words.
-- Talk about: {topic_['facts']}
+- Talk about: {topic_['facts']}{room_line}
 - Delivery: {fmt[1]}
 - Mood: {MOOD_LINES.get(mood, MOOD_LINES['normal'])}
 - Opening: {opening[1]}
@@ -912,7 +1031,7 @@ Song that's just finishing: {describe(ctx.get('last'))}
 Next song: {describe(ctx.get('next'))}
 (She may name the next song if it looks like a real song. If it looks like an advert, a radio clip or is unknown, she doesn't mention it.)
 Write only the words Cara says."""
-    d = fresh_draft(prompt, skip)
+    d = fresh_draft(prompt, skip, read)
     if d:
         MEM.remember(d[0], topic_["label"], fmt[0], opening[0], ending, d[1])
         return d[0]
@@ -951,8 +1070,11 @@ def write_popin(info):
     except Exception:
         pass
     kinds = [k for k in D["popinKinds"] if k[0] not in MEM.last("popins", 4)
-             and (k[0] != "fact" or fact) and (k[0] != "callback" or MEM.last_break)]
+             and (k[0] != "fact" or fact) and (k[0] != "callback" or MEM.last_break)
+             and (k[0] != "read" or (info and info.get("title") and "read" not in MEM.last("openings", 1)))]
     kind = random.choice(kinds or D["popinKinds"])
+    read = song_read(info) if kind[0] == "read" else None
+    room_line = read_block(read, "the song that's playing") if read else ""
     c = chattiness()
     lo, hi = (8, 16) if c == "quick" else ((10, 22) if c == "normal" else (14, 30))
     tag = random.choice([t for t in TAGS if t not in MEM.last("tags", 4)] or TAGS)
@@ -963,7 +1085,7 @@ def write_popin(info):
 {PERSONA}
 
 The song {name} started a few seconds ago, and she pops back in over it.
-- What to do: {kind[1]}
+- What to do: {kind[1]}{room_line}
 - Length: {lo} to {hi} words.
 {('- ' + fact) if fact else ''}
 {('- Her last break was: "' + (MEM.last_break or '') + '"') if kind[0] == 'callback' else ''}
@@ -975,7 +1097,7 @@ NEVER REPEAT YOURSELF
 
 {RULES}
 Write only the words Cara says."""
-    d = fresh_draft(prompt, skip)
+    d = fresh_draft(prompt, skip, read)
     if d:
         MEM.remember(d[0], tags=d[1], popin=kind[0])
         return d[0]
@@ -1080,6 +1202,11 @@ def write_duo(style, ctx):
     song_words = set(words(" ".join(describe(t) for t in (ctx.get("last"), ctx.get("next")) if t)))
     co_move = MEM.fresh("coMoves", D.get("coMoves") or ["Meets Cara's chaos with slow, unbothered cool, then lands one perfect comeback."])
     switched = STATION.switched_from()
+    # now and then one of them reads the room: a quick jab about what the listener's song says about them, then on with it
+    read = song_read(ctx.get("next") if style == "intro" else (ctx.get("last") or ctx.get("next"))) if time_to_read() else None
+    room_line = read_block(read, read_which(style, ctx), duo=True) if read else ""
+    if read:
+        print(f"[reading the room: {read['info']['title']}{'' if read['lyrics'] else ', title only'}]")
     print(f"[duo: {lo}-{hi} lines, {first} first]")
     tag_line = (f"Each line may use one emotion tag, ONLY [{'] or ['.join(tag_choices)}], placed mid-sentence right before the words it colours (never first). Most lines have none."
                 if expressive() else "Don't use any square-bracket tags.")
@@ -1098,7 +1225,7 @@ CARA: {PERSONA}
 
 THIS BREAK
 - What's happening: {DUO_SITUATIONS.get(style, DUO_SITUATIONS['talkover'])}{switch_line}
-- Talk about: {topic_['facts']}
+- Talk about: {topic_['facts']}{room_line}
 - {CO_SHORT}'s move this time (work it in naturally): {co_move}
 - Shape: a quick back-and-forth between two DJs and old friends who've done a thousand shows together: teasing, interruptions, callbacks, each firing back at the other. Every line is short (3 to 22 words) and sounds spoken, not written.
 - Length: {lo} to {hi} lines and {most} words at most in total. {first} speaks first and they take turns.
@@ -1160,6 +1287,10 @@ Write ONLY the dialogue: one line per turn, each starting with CARA: or {up}:"""
             feedback = f"It has to be a conversation: at least two lines, with both CARA: and {up}: speaking."
             print(f"[rewrite {attempt + 1}: not a conversation]")
             continue
+        if read and read["lyrics"] and quotes_lyrics(joined, read["lyrics"], read["info"]["title"]):
+            feedback = "It quoted the song's lyrics. Never quote them: react to what the song's about in your own words."
+            print(f"[rewrite {attempt + 1}: quoted the lyrics]")
+            continue
         why = problem(joined, MEM.recent, skip)
         if why:
             print(f"[rewrite {attempt + 1}: {why}]")
@@ -1167,10 +1298,10 @@ Write ONLY the dialogue: one line per turn, each starting with CARA: or {up}:"""
             if best is None and not mentions_death(joined) and not says_label(joined):
                 best = lines
             continue
-        MEM.remember(joined, topic_["label"], ending=ending, tags=used)
+        MEM.remember(joined, topic_["label"], opening="read" if read else None, ending=ending, tags=used)
         return lines
     if best:
-        MEM.remember(" ".join(t for _, t in best), topic_["label"], ending=ending)
+        MEM.remember(" ".join(t for _, t in best), topic_["label"], opening="read" if read else None, ending=ending)
         return best
     return []
 
