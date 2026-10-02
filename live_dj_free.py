@@ -14,6 +14,7 @@ import os
 import random
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -25,6 +26,8 @@ import pygame
 import requests
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+
+import brain   # Cara's brain (what she talks about, her memory, the station name, her co-host Alex): shared with the iPhone app
 
 # ---------------- CONFIG: edit these ----------------
 MODE = "gemini"                    # "template" or "gemini"
@@ -131,6 +134,10 @@ def remember_break(text):
     RECENT_BREAKS.append(text)
     del RECENT_BREAKS[:-RECENT_KEEP]
 DJ_MOOD = "normal"                 # "chill", "normal", "unhinged" or "mixed" (random each break); the app's DJ MOOD row sets this
+CHATTINESS = "chatty"              # how much she says: "quick", "normal" or "chatty" (the app's TALK LENGTH row sets this)
+COHOST_ENABLED = True              # her co-host Alex joins some breaks (needs the ElevenLabs voice and a Gemini key)
+COHOST_CHANCE = 0.4                # chance a break is Cara and Alex together
+COHOST_VOICE = ""                  # ElevenLabs voice ID for Alex ("" = a built-in deep, warm radio voice)
 TRIVIA_ENABLED = True              # song/artist fun facts (real ones, from Wikipedia)
 DJ_NAME = "Cara"
 DJ_STYLE = (
@@ -246,6 +253,7 @@ STOP = threading.Event()  # set this to make main() finish (used by the desktop 
 FORCE_BREAKING = threading.Event()  # set this to fire a breaking-news interruption right now (test button)
 FORCE_POPIN = threading.Event()     # set this to fire a pop-in on the current song right now (test button)
 FORCE_STINGER = threading.Event()   # set this to fire a station tag right now (test button)
+FORCE_DUO = threading.Event()       # set this to hear Cara and Alex right now (test button)
 
 sp = spotipy.Spotify(
     auth_manager=SpotifyOAuth(
@@ -784,11 +792,10 @@ looks like a radio segment, ad or DJ clip, or is unknown, don't mention it.)"""
 
 
 def write_break(last_song, style="talkover", next_song=None, ctx=None):
-    if MODE == "gemini":
-        try:
-            return gemini_break(last_song, style, next_song, ctx)
-        except Exception as e:
-            print("Gemini failed, using template instead:", e)
+    try:
+        return brain.write_break(style, ctx or {"next": None, "last": None})
+    except Exception as e:
+        print("Cara's brain hit a snag, so this one's a simple line:", e)
     return template_break(last_song, style, next_song, ctx)
 
 
@@ -800,6 +807,10 @@ _kokoro = None
 
 def write_popin(info):
     """A quick mid-song pop-in: the song name, plus one punchy or relevant remark."""
+    try:
+        return brain.write_popin(info)
+    except Exception as e:
+        print("Cara's brain hit a snag on the pop-in:", e)
     title = (info or {}).get("title") or "this one"
     artist = (info or {}).get("artist") or ""
     name = f'"{title}" by {artist}' if artist else f'"{title}"'
@@ -1095,6 +1106,12 @@ def elevenlabs_tts(text, path):
 
 
 def make_clip(last_song, style="talkover", next_song=None, ctx=None):
+    try:
+        duo = brain.maybe_duo(style, ctx or {})   # sometimes Alex joins her
+        if duo:
+            return duo
+    except Exception as e:
+        print(f"{brain.CO_NAME} couldn't join this one ({e}), so Cara takes it solo.")
     text = write_break(last_song, style, next_song, ctx)
     print(f"[DJ:{style}] {text}")
     return synth_clip(text)
@@ -1185,7 +1202,7 @@ def write_breaking(cat, headline, serious):
             if serious else
             "Keep a little of your on-air energy, but deliver the facts accurately."
         )
-        prompt = f"""You are {DJ_NAME}, {DJ_STYLE}, on a non-stop pop station in {CITY}.
+        prompt = f"""You are {DJ_NAME}, {DJ_STYLE}, on the radio station {brain.STATION.full()} in {CITY} (only ever call it that).
 You are interrupting the song in the middle for a BREAKING NEWS flash ({cat} news).
 Write 20-40 words to be spoken aloud: a quick "we interrupt the music" style opener in your own
 words, then the news, then a short hand-off back to the music.
@@ -1195,6 +1212,7 @@ Rules:
 - Use only the facts in the headline. Never add details, names, numbers or guesses.
 - Stay neutral: no opinions about politicians, parties, governments or countries.
 - Clean language, no emojis, no stage directions, no asterisks, never whisper or say "shh".
+- Never say the words "slogan" or "tagline", and never mention anyone dying.
 - Write for the ear: contractions, natural pauses, numbers spelled out the way people say them."""
         key = os.environ["GEMINI_API_KEY"]
         for model in GEMINI_MODELS:
@@ -1705,6 +1723,21 @@ def main():
         finally:
             popin["building"] = False
 
+    def build_duo_now(info):
+        popin["building"] = True
+        try:
+            path = brain.maybe_duo("intro", {"last": None, "next": info}, force=True)
+            if path:
+                popin["path"] = path
+                print(f"[Cara and {brain.CO_NAME} ready]")
+            else:
+                popin.update(uri=None, forced=False)
+        except Exception as e:
+            print(f"Could not make Cara and {brain.CO_NAME}:", e)
+            popin.update(uri=None, forced=False)
+        finally:
+            popin["building"] = False
+
     def drop_popin():
         if popin["path"]:
             try:
@@ -1773,6 +1806,11 @@ def main():
                 print("Spotify error:", e)
                 time.sleep(3)
                 continue
+            if pb and pb.get("item"):
+                try:
+                    brain.STATION.update(pb.get("context"))   # the station takes the name of what's playing
+                except Exception:
+                    pass
             item = pb.get("item") if pb else None
             if pb and pb.get("is_playing") and item and item.get("duration_ms"):
                 state.update(
@@ -1860,6 +1898,18 @@ def main():
                 print("Testing pop-in...")
                 popin.update(uri=state["uri"], at=0, forced=True)
                 threading.Thread(target=build_popin, args=(state["track"],), daemon=True).start()
+
+        # Test button: Cara and her co-host, right now, over this song
+        if FORCE_DUO.is_set():
+            FORCE_DUO.clear()
+            if not can_duck:
+                print("Cara and Alex duck the music, and Spotify isn't letting the app change its volume right now. Check that the Spotify app is the active device.")
+            elif not popin["path"] and not popin["building"]:
+                print(f"Testing Cara and {brain.CO_NAME}...")
+                popin.update(uri=state["uri"], at=0, forced=True)
+                threading.Thread(target=build_duo_now, args=(state["track"],), daemon=True).start()
+            else:
+                print("A pop-in is on its way first. Try again in a moment.")
 
         # Pop-in: a quick second drop-in shortly after the song starts after a talk-over / intro
         if popin["path"]:
@@ -1992,6 +2042,9 @@ def main():
 
         time.sleep(0.1)
     print("DJ stopped.")
+
+
+brain.attach(sys.modules[__name__])
 
 
 if __name__ == "__main__":

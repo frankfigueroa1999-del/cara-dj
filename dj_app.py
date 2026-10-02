@@ -60,6 +60,10 @@ DEFAULTS = {
     "duck_percent": 20,
     "stinger_chance": 35,
     "mood": "normal",
+    "chattiness": "chatty",
+    "cohost_enabled": True,
+    "cohost_chance": 40,
+    "cohost_voice": "",
 }
 TRANSITION_WEIGHTS = {"talkover": 4, "intro": 3, "silent": 3, "fadeout": 2}
 
@@ -414,7 +418,7 @@ class App:
 
         root.title(APP_NAME)
         root.configure(bg=BG)
-        root.geometry("500x960")
+        root.geometry("500x1000")
         root.minsize(460, 740)
         self.build_ui()
         dark_titlebar(root)
@@ -484,8 +488,9 @@ class App:
         # ---- header
         head = tk.Frame(outer, bg=BG)
         head.pack(fill="x")
-        self._label(head, "NON STOP POP", size=12, color=FG, bold=True).pack(side="left")
         self._link(head, "SETTINGS", self.open_settings).pack(side="right")
+        self.brand_var = tk.StringVar(value="NON STOP POP")
+        self._label(head, var=self.brand_var, size=12, color=FG, bold=True).pack(side="left")
         self.station_var = tk.StringVar(value="")
         self._label(outer, var=self.station_var, size=8).pack(fill="x", pady=(4, 0))
 
@@ -615,6 +620,19 @@ class App:
         self.pop_sec_var = tk.StringVar(value=str(self.cfg.get("popin_secs", 15)))
         tk.Entry(pop2, textvariable=self.pop_sec_var, width=4).pack(side="left")
 
+        co = tk.Frame(pv, bg=BG)
+        co.pack(fill="x", pady=(10, 0))
+        self._label(co, "CO-HOST", size=8, width=14).pack(side="left")
+        self.co_var = tk.BooleanVar(value=bool(self.cfg.get("cohost_enabled", True)))
+        self._check(co, "ALEX JOINS IN", self.co_var).pack(side="left", padx=(0, 6))
+        self._label(co, "CHANCE %", size=8).pack(side="left", padx=(0, 4))
+        self.co_chance_var = tk.StringVar(value=str(self.cfg.get("cohost_chance", 40)))
+        co_entry = tk.Entry(co, textvariable=self.co_chance_var, width=4)
+        co_entry.pack(side="left", padx=(0, 12))
+        co_entry.bind("<FocusOut>", lambda e: self.on_option_change())
+        co_entry.bind("<Return>", lambda e: self.on_option_change())
+        self._link(co, "TEST NOW", self.test_duo).pack(side="left")
+
         tags = tk.Frame(pv, bg=BG)
         tags.pack(fill="x", pady=(10, 0))
         self._label(tags, "STATION TAGS", size=8, width=14).pack(side="left")
@@ -684,6 +702,18 @@ class App:
             b.pack(side="left", padx=(0, 12))
             self.mood_btns[key] = b
         self.set_mood(self.cfg.get("mood", "normal"), save=False)
+
+        tl = tk.Frame(pv, bg=BG)
+        tl.pack(fill="x", pady=(12, 0))
+        self._label(tl, "TALK LENGTH", size=8, width=14).pack(side="left")
+        self.talk_btns = {}
+        for key in ("quick", "normal", "chatty"):
+            b = tk.Button(tl, text=key.upper(), command=lambda k=key: self.set_chattiness(k), bg=BG, fg=MUTED,
+                          activebackground=BG, activeforeground=FG, relief="flat", bd=0, highlightthickness=0,
+                          cursor="hand2", font=(FONT, 8), padx=0, pady=0)
+            b.pack(side="left", padx=(0, 12))
+            self.talk_btns[key] = b
+        self.set_chattiness(self.cfg.get("chattiness", "chatty"), save=False)
 
         self._rule(pv, pady=(20, 14))
 
@@ -797,7 +827,7 @@ class App:
                     page = sp.current_user_playlists(limit=50, offset=offset)
                     for p in page.get("items", []):
                         if p and p.get("uri"):
-                            items.append({"label": p.get("name") or "Untitled", "uri": p["uri"]})
+                            items.append({"label": p.get("name") or "Untitled", "uri": p["uri"], "name": p.get("name") or ""})
                     if not page.get("next"):
                         break
                     offset += 50
@@ -842,10 +872,10 @@ class App:
                         who = ", ".join(x["name"] for x in a.get("artists", []))
                         single = (a.get("album_type") or "").lower() in ("single", "ep")
                         (singles if single else albums).append(
-                            {"label": f"{a['name']}  —  {who}   ·   {'SINGLE' if single else 'ALBUM'}", "uri": a["uri"]})
+                            {"label": f"{a['name']}  —  {who}   ·   {'SINGLE' if single else 'ALBUM'}", "uri": a["uri"], "name": a["name"]})
                 for a in (r.get("artists") or {}).get("items", []):
                     if a:
-                        artists.append({"label": f"{a['name']}   ·   ARTIST", "uri": a["uri"]})
+                        artists.append({"label": f"{a['name']}   ·   ARTIST", "uri": a["uri"], "name": a["name"]})
                 items = songs + albums + singles + artists
             except Exception as e:
                 err = str(e)
@@ -865,13 +895,16 @@ class App:
     def play_selected(self, lb, items):
         sel = lb.curselection()
         if sel and sel[0] < len(items):
-            self.start_uri(items[sel[0]]["uri"])
+            self.start_uri(items[sel[0]]["uri"], items[sel[0]].get("name"))
 
-    def start_uri(self, uri):
+    def start_uri(self, uri, name=None):
         """Start a song, album, artist or playlist in the Spotify app on this PC."""
         if not self.connected or self.dj is None:
             return
         is_song = uri.startswith("spotify:track:")
+        b = getattr(self.dj, "brain", None)
+        if b is not None and name and not is_song:
+            b.STATION.remember(uri, name)       # the station takes this name as soon as it starts
 
         def work():
             sp = self.dj.sp
@@ -902,7 +935,7 @@ class App:
         win = tk.Toplevel(self.root)
         win.title("Settings")
         win.configure(bg=BG)
-        win.geometry("460x640")
+        win.geometry("460x700")
         win.transient(self.root)
         dark_titlebar(win)
         fields = [
@@ -912,6 +945,7 @@ class App:
             ("ELEVENLABS VOICE ID", "elevenlabs_voice_id", False),
             ("GEMINI API KEY (WRITES THE DJ LINES)", "gemini_api_key", True),
             ("TOWN (LIKE: YAKIMA, WASHINGTON)", "city", False),
+            ("ALEX'S VOICE ID (OPTIONAL, ELEVENLABS)", "cohost_voice", False),
         ]
         entries = {}
         body = tk.Frame(win, bg=BG)
@@ -974,6 +1008,11 @@ class App:
             self.cfg["stinger_chance"] = max(0, min(100, int(self.st_chance_var.get())))
         except ValueError:
             pass
+        self.cfg["cohost_enabled"] = bool(self.co_var.get())
+        try:
+            self.cfg["cohost_chance"] = max(0, min(100, int(self.co_chance_var.get())))
+        except ValueError:
+            pass
         save_config(self.cfg)
         if self.dj_running():
             self.apply_settings()  # takes effect on the very next break
@@ -1000,6 +1039,10 @@ class App:
         dj.DUCK_PERCENT = None if c.get("duck_auto", True) else int(c.get("duck_percent", 20))
         dj.STINGER_CHANCE = int(c.get("stinger_chance", 35)) / 100.0
         dj.DJ_MOOD = c.get("mood", "normal")
+        dj.CHATTINESS = c.get("chattiness", "chatty")
+        dj.COHOST_ENABLED = bool(c.get("cohost_enabled", True))
+        dj.COHOST_CHANCE = int(c.get("cohost_chance", 40)) / 100.0
+        dj.COHOST_VOICE = (c.get("cohost_voice") or "").strip()
         weights = {k: w for k, w in TRANSITION_WEIGHTS.items() if c.get("t_" + k)}
         dj.TRANSITIONS = weights or dict(TRANSITION_WEIGHTS)
         if c["city"] and c["city"].strip() != dj.CITY:
@@ -1011,7 +1054,8 @@ class App:
         os.environ["SPOTIPY_CLIENT_ID"] = c["spotify_client_id"]
         os.environ["SPOTIPY_CLIENT_SECRET"] = c["spotify_client_secret"]
         os.environ["SPOTIPY_REDIRECT_URI"] = REDIRECT_URI
-        os.environ["DJ_SCOPES"] = "user-read-playback-state user-modify-playback-state playlist-read-private"
+        os.environ["DJ_SCOPES"] = "user-read-playback-state user-modify-playback-state playlist-read-private user-top-read"
+        os.environ["DJ_APP_DIR"] = APP_DIR      # Cara's memory and the station names live here
         os.environ["DJ_CACHE_PATH"] = CACHE_PATH
         os.environ["DJ_STINGER_DIR"] = os.path.join(APP_DIR, "stingers")
         os.makedirs(my_stingers_folder(), exist_ok=True)
@@ -1069,6 +1113,21 @@ class App:
         names = {"talkover": "talk over", "intro": "over the intro", "silent": "silent", "fadeout": "fade out"}
         self.queue_note.set(f"Queued: the next break will be {names[key]}, at the end of this song.")
         print(f"[queued next transition: {key}]")
+
+    def test_duo(self):
+        if not self.dj_running():
+            messagebox.showinfo(APP_NAME, "Start the DJ and play a song first, then press Test now.")
+            return
+        self.dj.FORCE_DUO.set()
+
+    def set_chattiness(self, key, save=True):
+        self.cfg["chattiness"] = key
+        for k, b in self.talk_btns.items():
+            b.configure(fg=FG if k == key else MUTED, font=(FONT, 8, "bold underline" if k == key else "normal"))
+        if save:
+            save_config(self.cfg)
+        if self.dj is not None:
+            self.dj.CHATTINESS = key
 
     def set_mood(self, key, save=True):
         self.cfg["mood"] = key
@@ -1168,6 +1227,12 @@ class App:
                 continue
             empty_since = None
             last_note = None
+            b = getattr(self.dj, "brain", None)
+            if b is not None:
+                try:
+                    b.STATION.update(pb.get("context"))
+                except Exception:
+                    pass
             artists = ", ".join(a["name"] for a in (item.get("artists") or []) if a.get("name"))
             self.now = {
                 "title": item.get("name", ""),
@@ -1215,6 +1280,8 @@ class App:
                 self.log.configure(state="disabled")
                 if line.startswith("[DJ:") or line.startswith("[BREAKING"):
                     self.line_var.set('"' + line.split("] ", 1)[-1] + '"')
+                elif line.startswith("[DUO:") and "\n" in line:
+                    self.line_var.set(line.split("\n", 1)[1])
         except queue.Empty:
             pass
 
@@ -1257,6 +1324,18 @@ class App:
             self.dj_button.configure(text="START DJ", bg=BG, fg=FG, activebackground=BG, activeforeground=FG)
             self.status_var.set("DJ IS OFF")
         self.station_var.set(f"LIVE FROM {self.cfg['city'].upper()}")
+        b = getattr(self.dj, "brain", None) if self.dj is not None else None
+        name = "NON STOP POP"
+        if b is not None and self.connected:
+            try:
+                if b.STATION.name() != b.FALLBACK:
+                    name = b.STATION.full().upper()
+            except Exception:
+                pass
+        if len(name) > 30:
+            name = name[:29].rstrip() + "…"
+        if self.brand_var.get() != name:
+            self.brand_var.set(name)
         self.root.after(250, self.pump)
 
     def on_close(self):
@@ -1273,16 +1352,25 @@ def self_test(path):
     result = "ok"
     try:
         importlib.import_module("live_dj_free")
+        brain = importlib.import_module("brain")
         import edge_tts, feedparser, numpy, requests, spotipy  # noqa: F401
+        import pygame.sndarray  # noqa: F401  (mixes Cara and Alex together)
+        if len(brain.SEGMENTS) < 40 or len(brain.D["duoSegments"]) < 16:
+            raise RuntimeError("Cara's brain data is incomplete")
         here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
         bundled = [n for n in os.listdir(os.path.join(here, "my_stingers")) if n.lower().endswith(".mp3")]
         if len(bundled) < 6:
             result = f"fail: only {len(bundled)} stingers inside the app"
         root = tk.Tk()
+        root.withdraw()
+        app = App(root)                 # builds the whole window: every row, button and setting
+        app.set_chattiness("quick", save=False)
+        app.pump()
         root.update_idletasks()
         root.destroy()
     except Exception as e:
-        result = "fail: " + repr(e)
+        import traceback
+        result = "fail: " + repr(e) + " | " + traceback.format_exc()[-600:].replace("\n", " / ")
     with open(path, "w", encoding="utf-8") as f:
         f.write(result)
 

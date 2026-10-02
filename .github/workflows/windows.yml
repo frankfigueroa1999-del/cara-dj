@@ -29,7 +29,8 @@ jobs:
           --icon app.ico
           --add-data "app.ico;."
           --add-data "my_stingers;my_stingers"
-          --hidden-import live_dj_free
+          --add-data "brain_data.json;."
+          --hidden-import live_dj_free --hidden-import brain --hidden-import pygame.sndarray
           --collect-all feedparser --collect-all edge_tts
           --exclude-module kokoro_onnx --exclude-module onnxruntime --exclude-module soundfile
           dj_app.py
@@ -66,4 +67,4 @@ jobs:
           gh release create desktop-latest dist/NonStopPopDJ.exe \
             --target "$GITHUB_SHA" \
             --title "Non Stop Pop DJ for Windows" \
-            --notes "Download NonStopPopDJ.exe and double-click it. Windows may say it protected your PC (the app isn't signed): click More info, then Run anyway. Your keys go in Settings once and are saved on your PC."
+            --notes "Cara's full brain from the iPhone app (her memory, every segment, the station named after your playlist) and her co-host Alex. Download NonStopPopDJ.exe and double-click it. Windows may say it protected your PC (the app isn't signed): click More info, then Run anyway. Your keys go in Settings once and are saved on your PC."
