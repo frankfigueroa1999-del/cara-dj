@@ -1035,6 +1035,7 @@ def write_duo(style, ctx):
     ending = random.choice([e for e in D["duoEndings"] if e not in MEM.last("endings", 5)] or D["duoEndings"])
     tag_choices = random.sample([t for t in TAGS if t not in MEM.last("tags", 4)] or TAGS, 3)
     skip = reusable(ctx, extra={CO_NAME.lower(), "london", "grandpa", "vinyl"})
+    alex_move = MEM.fresh("coMoves", D.get("coMoves") or ["Meets Cara's chaos with slow, unbothered cool, then lands one perfect comeback."])
     switched = STATION.switched_from()
     print(f"[duo: {lo}-{hi} lines, {first} first]")
     tag_line = (f"Each line may use one emotion tag, ONLY [{'] or ['.join(tag_choices)}], placed mid-sentence right before the words it colours (never first). Most lines have none."
@@ -1047,12 +1048,14 @@ CARA: {PERSONA}
 {bible()}
 {up}: {CO_PERSONA}
 {CO_BIBLE}
+{D.get("coIdentity", "")}
 {station_line()}
 {D.get("whoIsWho", "")}
 
 THIS BREAK
 - What's happening: {DUO_SITUATIONS.get(style, DUO_SITUATIONS['talkover'])}{switch_line}
 - Talk about: {topic_['facts']}
+- {CO_NAME}'s move this time (work it in naturally): {alex_move}
 - Shape: a quick back-and-forth between two DJs and old friends who've done a thousand shows together: teasing, interruptions, callbacks, each firing back at the other. Every line is short (3 to 22 words) and sounds spoken, not written.
 - Length: {lo} to {hi} lines and {most} words at most in total. {first} speaks first and they take turns.
 - Mood: {MOOD_LINES.get(mood, MOOD_LINES['normal'])}
