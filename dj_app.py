@@ -624,7 +624,7 @@ class App:
         co.pack(fill="x", pady=(10, 0))
         self._label(co, "CO-HOST", size=8, width=14).pack(side="left")
         self.co_var = tk.BooleanVar(value=bool(self.cfg.get("cohost_enabled", True)))
-        self._check(co, "ALEX JOINS IN", self.co_var).pack(side="left", padx=(0, 6))
+        self._check(co, "SCRATCH JOINS IN", self.co_var).pack(side="left", padx=(0, 6))
         self._label(co, "CHANCE %", size=8).pack(side="left", padx=(0, 4))
         self.co_chance_var = tk.StringVar(value=str(self.cfg.get("cohost_chance", 40)))
         co_entry = tk.Entry(co, textvariable=self.co_chance_var, width=4)
@@ -945,7 +945,7 @@ class App:
             ("ELEVENLABS VOICE ID", "elevenlabs_voice_id", False),
             ("GEMINI API KEY (WRITES THE DJ LINES)", "gemini_api_key", True),
             ("TOWN (LIKE: YAKIMA, WASHINGTON)", "city", False),
-            ("ALEX'S VOICE ID (OPTIONAL, ELEVENLABS)", "cohost_voice", False),
+            ("SCRATCH'S VOICE ID (OPTIONAL, ELEVENLABS)", "cohost_voice", False),
         ]
         entries = {}
         body = tk.Frame(win, bg=BG)
@@ -1354,7 +1354,7 @@ def self_test(path):
         importlib.import_module("live_dj_free")
         brain = importlib.import_module("brain")
         import edge_tts, feedparser, numpy, requests, spotipy  # noqa: F401
-        import pygame.sndarray  # noqa: F401  (mixes Cara and Alex together)
+        import pygame.sndarray  # noqa: F401  (mixes Cara and Scratch together)
         if len(brain.SEGMENTS) < 40 or len(brain.D["duoSegments"]) < 16:
             raise RuntimeError("Cara's brain data is incomplete")
         here = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))

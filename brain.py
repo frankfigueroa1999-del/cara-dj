@@ -3,7 +3,7 @@ Cara's brain for the PC app, ported from the iPhone app.
 
 What she talks about (43 topics), how she says it (styles, openings, landings, voice tags), how long she talks,
 a memory that keeps her from repeating herself (saved on this PC), the station named after whatever's playing,
-and breaks where her co-host Alex joins her. The lists themselves live in brain_data.json, shared with the iPhone app.
+and breaks where her co-host Scratch joins her. The lists themselves live in brain_data.json, shared with the iPhone app.
 """
 import datetime
 import json
@@ -49,7 +49,9 @@ ENDINGS = D["endings"]
 TAGS = D["tags"]
 PERSONA = D["persona"]
 RULES = D["rules"]
-CO_NAME = D["coName"]
+CO_NAME = D["coName"]                       # "MC Scratch"
+CO_SHORT = D.get("coShort") or CO_NAME      # what everyone calls him: "Scratch"
+CO_LABEL = D.get("coLabel") or CO_NAME.upper()   # his label in their scripts: "SCRATCH"
 CO_PERSONA = D["coPersona"]
 CO_BIBLE = D["coBible"]
 CO_DEFAULT_VOICE = D["coDefaultVoice"]
@@ -954,7 +956,7 @@ Write only the words Cara says."""
     return line
 
 
-# ---------------------------------------------------------------- Cara and Alex together
+# ---------------------------------------------------------------- Cara and Scratch together
 def pick_duo_topic(ctx):
     recent = set(MEM.last("segments", 8))
     pool = {s["id"]: s["weight"] for s in D["duoSegments"] if "duo_" + s["id"] not in recent}
@@ -985,7 +987,7 @@ def _duo_topic_for(seg, ctx):
     else:
         sid = seg["id"]
         if sid == "story_swap":
-            facts = (f"{CO_NAME}'s story from his Los Santos days (use only these details): " + MEM.fresh("coLore", D["coLore"])
+            facts = (f"{CO_SHORT}'s story from his Los Santos days (use only these details): " + MEM.fresh("coLore", D["coLore"])
                      + " Cara's story to top it (use only these details): " + MEM.fresh("lore", D["lore"]))
         elif sid == "debate":
             facts = "The burning question: " + MEM.fresh("opinions", D["opinions"])
@@ -1004,7 +1006,7 @@ def _duo_topic_for(seg, ctx):
 
 
 def parse_duo(raw):
-    """Reads 'CARA: ...' / 'ALEX: ...' lines (anything else joins the line before it)."""
+    """Reads 'CARA: ...' / 'SCRATCH: ...' lines (anything else joins the line before it)."""
     out = []
     for piece in (raw or "").splitlines():
         line = piece.replace("*", "").strip().lstrip("-•").strip()
@@ -1013,9 +1015,9 @@ def parse_duo(raw):
         if ":" in line:
             who, text = line.split(":", 1)
             who = who.strip().upper()
-            if who in ("CARA", CO_NAME.upper()):
+            if who in ("CARA", CO_LABEL, CO_NAME.upper()):
                 if text.strip():
-                    out.append([who, text.strip()])
+                    out.append(["CARA" if who == "CARA" else CO_LABEL, text.strip()])
                 continue
         if out:
             out[-1][1] += " " + line
@@ -1023,7 +1025,7 @@ def parse_duo(raw):
 
 
 def write_duo(style, ctx):
-    """One Cara-and-Alex exchange, checked against their memory like her solo breaks. [] if it couldn't."""
+    """One Cara-and-Scratch exchange, checked against their memory like her solo breaks. [] if it couldn't."""
     ctx = dict(ctx or {})
     topic_ = pick_duo_topic(ctx)
     mood = current_mood()
@@ -1031,18 +1033,19 @@ def write_duo(style, ctx):
     silent = style == "silent"
     c = chattiness()
     lo, hi, most = {"quick": (3, 4, 50) if silent else (2, 2, 28), "normal": (4, 6, 80) if silent else (2, 3, 38)}.get(c, (5, 8, 110) if silent else (2, 4, 48))
-    first = random.choice(["Cara", CO_NAME])
+    first = random.choice(["Cara", CO_SHORT])
     ending = random.choice([e for e in D["duoEndings"] if e not in MEM.last("endings", 5)] or D["duoEndings"])
     tag_choices = random.sample([t for t in TAGS if t not in MEM.last("tags", 4)] or TAGS, 3)
-    skip = reusable(ctx, extra={CO_NAME.lower(), "london", "grandpa", "vinyl"})
-    alex_move = MEM.fresh("coMoves", D.get("coMoves") or ["Meets Cara's chaos with slow, unbothered cool, then lands one perfect comeback."])
+    skip = reusable(ctx, extra=set(words(CO_NAME)) | {"london", "vinyl"})
+    song_words = set(words(" ".join(describe(t) for t in (ctx.get("last"), ctx.get("next")) if t)))
+    co_move = MEM.fresh("coMoves", D.get("coMoves") or ["Meets Cara's chaos with slow, unbothered cool, then lands one perfect comeback."])
     switched = STATION.switched_from()
     print(f"[duo: {lo}-{hi} lines, {first} first]")
     tag_line = (f"Each line may use one emotion tag, ONLY [{'] or ['.join(tag_choices)}], placed mid-sentence right before the words it colours (never first). Most lines have none."
                 if expressive() else "Don't use any square-bracket tags.")
     switch_line = (f'\n- Fresh news: the listener just switched stations, from "{full_name(switched)}" to "{STATION.full()}". One of them welcomes the listener to the new one in a quick, playful line.'
                    if switched else "")
-    up = CO_NAME.upper()
+    up = CO_LABEL
     prompt = f"""You write a short on-air exchange between the two DJs of {STATION.full()}, broadcasting to {getattr(dj, 'CITY', 'Yakima, Washington')}.
 CARA: {PERSONA}
 {bible()}
@@ -1055,7 +1058,7 @@ CARA: {PERSONA}
 THIS BREAK
 - What's happening: {DUO_SITUATIONS.get(style, DUO_SITUATIONS['talkover'])}{switch_line}
 - Talk about: {topic_['facts']}
-- {CO_NAME}'s move this time (work it in naturally): {alex_move}
+- {CO_SHORT}'s move this time (work it in naturally): {co_move}
 - Shape: a quick back-and-forth between two DJs and old friends who've done a thousand shows together: teasing, interruptions, callbacks, each firing back at the other. Every line is short (3 to 22 words) and sounds spoken, not written.
 - Length: {lo} to {hi} lines and {most} words at most in total. {first} speaks first and they take turns.
 - Mood: {MOOD_LINES.get(mood, MOOD_LINES['normal'])}
@@ -1067,8 +1070,8 @@ NEVER REPEAT YOURSELVES
 {memory_block(skip)}
 
 {RULES}
-- {CO_NAME} is the one exception to the no-invented-characters rule: he's her co-host, in the studio with her. Nobody else joins them.
-- {CO_NAME} follows every rule too. Neither of them is a real radio host: never mention, name or imitate real DJs or presenters, and never claim to know celebrities personally.
+- {CO_SHORT} is the one exception to the no-invented-characters rule: he's her co-host, in the studio with her. Nobody else joins them.
+- {CO_SHORT} follows every rule too. Neither of them is a real radio host: never mention, name or imitate real DJs or presenters, and never claim to know celebrities personally.
 
 Song that's just finishing: {describe(ctx.get('last'))}
 Next song: {describe(ctx.get('next'))}
@@ -1086,6 +1089,15 @@ Write ONLY the dialogue: one line per turn, each starting with CARA: or {up}:"""
                 lines.append((who, t))
                 used += tg
         joined = " ".join(t for _, t in lines)
+        said = set(words(joined))
+        if "grandpa" in said or "gramps" in said:
+            feedback = f"Cara gave him an old-man nickname. She only ever calls him {CO_SHORT}."
+            print(f"[rewrite {attempt + 1}: old-man nickname]")
+            continue
+        if "alex" in said and "alex" not in song_words:
+            feedback = f"It called him Alex. His name is {CO_NAME}, {CO_SHORT} for short."
+            print(f"[rewrite {attempt + 1}: wrong name]")
+            continue
         if len(lines) < 2 or not any(w == up for w, _ in lines) or not any(w == "CARA" for w, _ in lines):
             feedback = f"It has to be a conversation: at least two lines, with both CARA: and {up}: speaking."
             print(f"[rewrite {attempt + 1}: not a conversation]")
@@ -1162,7 +1174,7 @@ def _trim(x):
 
 
 def render_duo(lines):
-    """Each line in its own voice, levelled, Cara a touch left and Alex a touch right, joined into one WAV."""
+    """Each line in its own voice, levelled, Cara a touch left and Scratch a touch right, joined into one WAV."""
     import numpy as np
     import pygame
     rate = (pygame.mixer.get_init() or (44100,))[0]
@@ -1212,13 +1224,13 @@ def render_duo(lines):
 
 
 def duo_ready():
-    """Alex needs the ElevenLabs voice and a Gemini key."""
+    """Scratch needs the ElevenLabs voice and a Gemini key."""
     return (getattr(dj, "TTS_ENGINE", "") == "elevenlabs" and bool(os.environ.get("GEMINI_API_KEY"))
             and getattr(dj, "MODE", "gemini") == "gemini")
 
 
 def wants_duo():
-    """Rolled when a break is planned: is this one Cara and Alex together? (They always talk between songs.)"""
+    """Rolled when a break is planned: is this one Cara and Scratch together? (They always talk between songs.)"""
     if not getattr(dj, "COHOST_ENABLED", True) or random.random() >= getattr(dj, "COHOST_CHANCE", 0.4):
         return False
     if not duo_ready():
@@ -1228,7 +1240,7 @@ def wants_duo():
 
 
 def maybe_duo(style, ctx, force=False):
-    """Sometimes it's Cara and Alex together: returns the clip (a WAV), or None for a solo Cara break."""
+    """Sometimes it's Cara and Scratch together: returns the clip (a WAV), or None for a solo Cara break."""
     if not force and not (getattr(dj, "COHOST_ENABLED", True) and random.random() < getattr(dj, "COHOST_CHANCE", 0.4)):
         return None
     solo = "" if force else ", so Cara takes it solo"

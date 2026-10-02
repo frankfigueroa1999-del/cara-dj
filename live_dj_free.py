@@ -27,7 +27,7 @@ import requests
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
-import brain   # Cara's brain (what she talks about, her memory, the station name, her co-host Alex): shared with the iPhone app
+import brain   # Cara's brain (what she talks about, her memory, the station name, her co-host Scratch): shared with the iPhone app
 
 # ---------------- CONFIG: edit these ----------------
 MODE = "gemini"                    # "template" or "gemini"
@@ -135,9 +135,9 @@ def remember_break(text):
     del RECENT_BREAKS[:-RECENT_KEEP]
 DJ_MOOD = "normal"                 # "chill", "normal", "unhinged" or "mixed" (random each break); the app's DJ MOOD row sets this
 CHATTINESS = "chatty"              # how much she says: "quick", "normal" or "chatty" (the app's TALK LENGTH row sets this)
-COHOST_ENABLED = True              # her co-host Alex joins some breaks (needs the ElevenLabs voice and a Gemini key)
-COHOST_CHANCE = 0.4                # chance a break is Cara and Alex together
-COHOST_VOICE = ""                  # ElevenLabs voice ID for Alex ("" = a built-in deep, warm radio voice)
+COHOST_ENABLED = True              # her co-host Scratch joins some breaks (needs the ElevenLabs voice and a Gemini key)
+COHOST_CHANCE = 0.4                # chance a break is Cara and Scratch together
+COHOST_VOICE = ""                  # ElevenLabs voice ID for Scratch ("" = a built-in deep, warm radio voice)
 TRIVIA_ENABLED = True              # song/artist fun facts (real ones, from Wikipedia)
 DJ_NAME = "Cara"
 DJ_STYLE = (
@@ -253,7 +253,7 @@ STOP = threading.Event()  # set this to make main() finish (used by the desktop 
 FORCE_BREAKING = threading.Event()  # set this to fire a breaking-news interruption right now (test button)
 FORCE_POPIN = threading.Event()     # set this to fire a pop-in on the current song right now (test button)
 FORCE_STINGER = threading.Event()   # set this to fire a station tag right now (test button)
-FORCE_DUO = threading.Event()       # set this to hear Cara and Alex right now (test button)
+FORCE_DUO = threading.Event()       # set this to hear Cara and Scratch right now (test button)
 
 sp = spotipy.Spotify(
     auth_manager=SpotifyOAuth(
@@ -1106,7 +1106,7 @@ def elevenlabs_tts(text, path):
 
 
 def make_clip(last_song, style="talkover", next_song=None, ctx=None, duo=False):
-    if duo:   # Cara and Alex together (rolled when the break was planned, so it lands between songs)
+    if duo:   # Cara and Scratch together (rolled when the break was planned, so it lands between songs)
         try:
             path = brain.maybe_duo(style, ctx or {}, force=True)
             if path:
@@ -1744,11 +1744,11 @@ def main():
             path = brain.maybe_duo("intro", {"last": None, "next": info}, force=True)
             if path:
                 popin["path"] = path
-                print(f"[Cara and {brain.CO_NAME} ready]")
+                print(f"[Cara and {brain.CO_SHORT} ready]")
             else:
                 popin.update(uri=None, forced=False)
         except Exception as e:
-            print(f"Could not make Cara and {brain.CO_NAME}:", e)
+            print(f"Could not make Cara and {brain.CO_SHORT}:", e)
             popin.update(uri=None, forced=False)
         finally:
             popin["building"] = False
@@ -1918,9 +1918,9 @@ def main():
         if FORCE_DUO.is_set():
             FORCE_DUO.clear()
             if not can_duck:
-                print("Cara and Alex duck the music, and Spotify isn't letting the app change its volume right now. Check that the Spotify app is the active device.")
+                print(f"Cara and {brain.CO_SHORT} duck the music, and Spotify isn't letting the app change its volume right now. Check that the Spotify app is the active device.")
             elif not popin["path"] and not popin["building"]:
-                print(f"Testing Cara and {brain.CO_NAME}...")
+                print(f"Testing Cara and {brain.CO_SHORT}...")
                 popin.update(uri=state["uri"], at=0, forced=True)
                 threading.Thread(target=build_duo_now, args=(state["track"],), daemon=True).start()
             else:
@@ -2002,7 +2002,7 @@ def main():
 
         # Start writing the break ~45s before the song ends
         if due and (remaining < 90000 or forced) and not prepared["path"] and not prepared["building"]:
-            # Cara and Alex always talk between songs (the music stops for them), so a song that starts straight
+            # Cara and Scratch always talk between songs (the music stops for them), so a song that starts straight
             # away never ends up under their chat. A talk-over or intro you queued yourself stays Cara on her own.
             duo = forced in (None, "silent") and brain.wants_duo()
             if duo:
