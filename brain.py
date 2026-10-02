@@ -69,8 +69,8 @@ SITUATIONS = {
 }
 DUO_SITUATIONS = {
     "silent": "The music has stopped and the studio is theirs. They dive straight in (never mention the silence or the music stopping) and bring the next song in at the end.",
-    "intro": "The next song has just started and they're talking over its opening. Keep it tight and bring the song in at the end.",
-    "talkover": "The current song is fading out under them. They roll straight into the next song at the end, no goodbyes.",
+    "intro": "The next song has just started and they're talking over its opening. A quick exchange (the song may kick in straight away, so never ramble), then they let it play.",
+    "talkover": "The current song is fading out under them. They wrap up as it ends and roll straight into the next song, no goodbyes.",
     "fadeout": "The current song is fading down under them. They roll straight into the next song at the end, no goodbyes.",
 }
 
@@ -1032,7 +1032,12 @@ def write_duo(style, ctx):
     print(f"[segment: {topic_['name']} (with {CO_NAME})] [mood: {mood}] [{chattiness()}]")
     silent = style == "silent"
     c = chattiness()
-    lo, hi, most = {"quick": (3, 4, 50) if silent else (2, 2, 28), "normal": (4, 6, 80) if silent else (2, 3, 38)}.get(c, (5, 8, 110) if silent else (2, 4, 48))
+    if silent:
+        lo, hi, most = {"quick": (3, 4, 50), "normal": (4, 6, 80)}.get(c, (5, 8, 110))
+    elif style == "intro":   # over the start of a song: a quick two-liner, so a song that kicks in straight away isn't buried
+        lo, hi, most = {"quick": (2, 2, 18), "normal": (2, 2, 22)}.get(c, (2, 3, 26))
+    else:
+        lo, hi, most = {"quick": (2, 2, 28), "normal": (2, 3, 38)}.get(c, (2, 4, 48))
     first = random.choice(["Cara", CO_SHORT])
     ending = random.choice([e for e in D["duoEndings"] if e not in MEM.last("endings", 5)] or D["duoEndings"])
     tag_choices = random.sample([t for t in TAGS if t not in MEM.last("tags", 4)] or TAGS, 3)

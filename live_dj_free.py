@@ -2002,13 +2002,10 @@ def main():
 
         # Start writing the break ~45s before the song ends
         if due and (remaining < 90000 or forced) and not prepared["path"] and not prepared["building"]:
-            # Cara and Scratch always talk between songs (the music stops for them), so a song that starts straight
-            # away never ends up under their chat. A talk-over or intro you queued yourself stays Cara on her own.
-            duo = forced in (None, "silent") and brain.wants_duo()
-            if duo:
-                style = "silent"
-            else:
-                style = (forced if can_duck else "silent") if forced else pick_style(can_duck, last_style)
+            # Scratch can join any kind of break, queued or not. Their talk-overs finish as the song ends and their
+            # intros are a quick two-liner, so a song that starts straight away isn't buried under their chat.
+            duo = brain.wants_duo()
+            style = (forced if can_duck else "silent") if forced else pick_style(can_duck, last_style)
             prepared["params"] = new_params()
             prepared["uri"] = state["uri"]
             threading.Thread(target=build, args=(state["name"], state["track"], style, duo), daemon=True).start()
