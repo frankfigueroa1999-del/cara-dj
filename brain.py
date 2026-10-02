@@ -1046,11 +1046,12 @@ CARA: {PERSONA}
 {up}: {CO_PERSONA}
 {CO_BIBLE}
 {station_line()}
+{D.get("whoIsWho", "")}
 
 THIS BREAK
 - What's happening: {DUO_SITUATIONS.get(style, DUO_SITUATIONS['talkover'])}{switch_line}
 - Talk about: {topic_['facts']}
-- Shape: a quick back-and-forth between two friends who've done a thousand shows together: teasing, interruptions, callbacks, each firing back at the other. Every line is short (3 to 22 words) and sounds spoken, not written.
+- Shape: a quick back-and-forth between two DJs and old friends who've done a thousand shows together: teasing, interruptions, callbacks, each firing back at the other. Every line is short (3 to 22 words) and sounds spoken, not written.
 - Length: {lo} to {hi} lines and {most} words at most in total. {first} speaks first and they take turns.
 - Mood: {MOOD_LINES.get(mood, MOOD_LINES['normal'])}
 - Landing: {ending}

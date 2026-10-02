@@ -852,7 +852,7 @@
  ],
  "duoEndings": [
   "End with Alex bringing the next song in by name, and Cara getting the last word.",
-  "End with Cara bringing the next song in by name while Alex grumbles he'd have picked it anyway.",
+  "End with Cara bringing the next song in by name while Alex grumbles he'd have spun it louder back on The Heat.",
   "End with them agreeing on exactly one thing, then the song.",
   "End mid-argument, with one of them cutting to the song to win it.",
   "End with a quick bet between them about the next song.",
@@ -1186,10 +1186,10 @@
    "weight": 3
   },
   {
-   "id": "who_picked",
-   "name": "Who picked this?",
+   "id": "two_judges",
+   "name": "Two-judge verdict",
    "base": "last_verdict",
-   "angle": "They bicker over who picked the song that just played: each blames the other, then one admits they secretly loved it.",
+   "angle": "They judge the song that just played like two talent-show judges: each scores it on a ridiculous scale of their own invention, one harsh and one gushing, and they argue about who's right.",
    "weight": 2
   },
   {
@@ -1203,7 +1203,7 @@
    "id": "roast_battle",
    "name": "Roast battle",
    "base": null,
-   "angle": "A quick, affectionate roast battle about each other's taste and habits (never looks, bodies or identity): two or three jabs each, then a truce.",
+   "angle": "A quick, affectionate roast battle between the two DJs about each other's music taste, their old Los Santos stations and their on-air habits (never looks, bodies or identity): two or three jabs each, then a truce.",
    "weight": 3
   },
   {
@@ -1252,7 +1252,7 @@
    "id": "listener_court",
    "name": "Listener court",
    "base": "your_stats",
-   "angle": "The listener is on trial for their listening habits: Cara prosecutes, Alex defends (badly), and they reach a ridiculous verdict.",
+   "angle": "The listener at home is on trial for their listening habits (these are the listener's stats, never Alex's or Cara's): Cara prosecutes, Alex defends them (badly), both talking about \"our listener\" or to \"you at home\", and they reach a ridiculous verdict.",
    "weight": 2
   },
   {
@@ -1273,7 +1273,7 @@
    "id": "station_name",
    "name": "The station's name",
    "base": null,
-   "angle": "They tease the listener about the name they picked and argue about what it says about them.",
+   "angle": "The listener picked this (it's their playlist or album, not either DJ's): the DJs tease the listener at home about the name and argue with each other about what it says about them.",
    "weight": 1
   }
  ],
@@ -1305,6 +1305,7 @@
   "The time he read out a shout-out list so long it lasted forty-five minutes and zero songs.",
   "The time his car stereo was so loud it rattled the windows of the station across the street, which happened to be Cara's."
  ],
+ "whoIsWho": "WHO'S WHO (never mix them up)\n- Cara and Alex are the two DJs, in the studio together. Both came up on Los Santos radio, on rival stations (Cara on Non Stop Pop FM, Alex on The Heat 104.9), and now they're co-hosts and old friends. With each other they talk like fellow DJs: studio banter, shared radio history, old rival-station trash talk.\n- The listener is someone else: a person at home or in the car, never in the studio, never speaking, and never Cara or Alex. Alex is NOT the listener.\n- Everything about the listener stays the listener's: the music is their pick (the station is named after what they put on), and their taste, listening habits, town and plans are theirs. Never pin any of it on Alex, and never talk to Alex as if he's the one listening.\n- When a DJ talks to the listener, make it obvious (\"you at home\", \"you in the car\", \"whoever's listening\"); when they talk to each other, they use names or nicknames.",
  "coName": "Alex",
  "coDefaultVoice": "nPczCjzI2devNBz1zQrb",
  "stopWords": [
