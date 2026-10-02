@@ -1,0 +1,69 @@
+name: Build the Windows app
+
+on:
+  push:
+    branches: [desktop]
+
+permissions:
+  contents: write
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install what the app needs
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller spotipy edge-tts feedparser requests pygame numpy
+
+      - name: Build NonStopPopDJ.exe
+        run: >
+          python -m PyInstaller --noconfirm --clean --onefile --windowed
+          --name NonStopPopDJ
+          --icon app.ico
+          --add-data "app.ico;."
+          --add-data "my_stingers;my_stingers"
+          --hidden-import live_dj_free
+          --collect-all feedparser --collect-all edge_tts
+          --exclude-module kokoro_onnx --exclude-module onnxruntime --exclude-module soundfile
+          dj_app.py
+
+      - name: Check the app opens and has everything it needs
+        shell: pwsh
+        env:
+          SDL_AUDIODRIVER: dummy
+          SPOTIPY_CLIENT_ID: selftest
+          SPOTIPY_CLIENT_SECRET: selftest
+          SPOTIPY_REDIRECT_URI: http://127.0.0.1:8888/callback
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "selftest.txt"
+          $env:NSP_SELFTEST = $out
+          $p = Start-Process -FilePath "dist\NonStopPopDJ.exe" -PassThru
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "The app didn't finish its self-test in time (it probably showed an error box)." }
+          if (-not (Test-Path $out)) { throw "The app quit without writing its self-test result." }
+          $r = (Get-Content $out -Raw).Trim()
+          Write-Host "Self-test: $r"
+          if ($r -ne "ok") { throw "Self-test failed: $r" }
+          Get-Item dist\NonStopPopDJ.exe | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NonStopPopDJ-exe
+          path: dist/NonStopPopDJ.exe
+
+      - name: Put the .exe on the Releases page
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete desktop-latest --yes --cleanup-tag || true
+          gh release create desktop-latest dist/NonStopPopDJ.exe \
+            --target "$GITHUB_SHA" \
+            --title "Non Stop Pop DJ for Windows" \
+            --notes "Download NonStopPopDJ.exe and double-click it. Windows may say it protected your PC (the app isn't signed): click More info, then Run anyway. Your keys go in Settings once and are saved on your PC."
