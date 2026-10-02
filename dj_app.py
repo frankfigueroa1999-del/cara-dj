@@ -63,6 +63,7 @@ DEFAULTS = {
     "chattiness": "chatty",
     "cohost_enabled": True,
     "cohost_chance": 40,
+    "cohost_swears": True,
     "cohost_voice": "",
 }
 TRANSITION_WEIGHTS = {"talkover": 4, "intro": 3, "silent": 3, "fadeout": 2}
@@ -631,6 +632,8 @@ class App:
         co_entry.pack(side="left", padx=(0, 12))
         co_entry.bind("<FocusOut>", lambda e: self.on_option_change())
         co_entry.bind("<Return>", lambda e: self.on_option_change())
+        self.co_swear_var = tk.BooleanVar(value=bool(self.cfg.get("cohost_swears", True)))
+        self._check(co, "HE CAN CURSE", self.co_swear_var).pack(side="left", padx=(0, 12))
         self._link(co, "TEST NOW", self.test_duo).pack(side="left")
 
         tags = tk.Frame(pv, bg=BG)
@@ -1009,6 +1012,7 @@ class App:
         except ValueError:
             pass
         self.cfg["cohost_enabled"] = bool(self.co_var.get())
+        self.cfg["cohost_swears"] = bool(self.co_swear_var.get())
         try:
             self.cfg["cohost_chance"] = max(0, min(100, int(self.co_chance_var.get())))
         except ValueError:
@@ -1042,6 +1046,7 @@ class App:
         dj.CHATTINESS = c.get("chattiness", "chatty")
         dj.COHOST_ENABLED = bool(c.get("cohost_enabled", True))
         dj.COHOST_CHANCE = int(c.get("cohost_chance", 40)) / 100.0
+        dj.COHOST_SWEARS = bool(c.get("cohost_swears", True))
         dj.COHOST_VOICE = (c.get("cohost_voice") or "").strip()
         weights = {k: w for k, w in TRANSITION_WEIGHTS.items() if c.get("t_" + k)}
         dj.TRANSITIONS = weights or dict(TRANSITION_WEIGHTS)

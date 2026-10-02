@@ -137,6 +137,7 @@ DJ_MOOD = "normal"                 # "chill", "normal", "unhinged" or "mixed" (r
 CHATTINESS = "chatty"              # how much she says: "quick", "normal" or "chatty" (the app's TALK LENGTH row sets this)
 COHOST_ENABLED = True              # her co-host Scratch joins some breaks (needs the ElevenLabs voice and a Gemini key)
 COHOST_CHANCE = 0.4                # chance a break is Cara and Scratch together
+COHOST_SWEARS = True               # Scratch curses where it lands (False keeps him clean); Cara never swears
 COHOST_VOICE = ""                  # ElevenLabs voice ID for Scratch ("" = a built-in deep, warm radio voice)
 TRIVIA_ENABLED = True              # song/artist fun facts (real ones, from Wikipedia)
 DJ_NAME = "Cara"

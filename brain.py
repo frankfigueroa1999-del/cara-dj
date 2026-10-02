@@ -55,6 +55,31 @@ CO_LABEL = D.get("coLabel") or CO_NAME.upper()   # his label in their scripts: "
 CO_PERSONA = D["coPersona"]
 CO_BIBLE = D["coBible"]
 CO_DEFAULT_VOICE = D["coDefaultVoice"]
+CO_LANGUAGE_ON = D.get("coLanguageOn", "")
+CO_LANGUAGE_OFF = D.get("coLanguageOff") or "HIS LANGUAGE: clean, no swearing. Cara never swears either."
+_STRONG_SWEARS = {"ass", "asses", "asshole", "assholes", "bitch", "bitches", "bastard", "bastards",
+                  "piss", "pissed", "damn", "damned", "dammit", "goddamn", "goddammit"}
+_MASKED = re.compile(r"[A-Za-z]\*+[A-Za-z]|\b[A-Za-z]\*{2,}")
+
+
+def co_language():
+    """How Scratch talks: gritty when his cursing is on (the default), clean when it's off (the app's CO-HOST row)."""
+    return CO_LANGUAGE_ON if getattr(dj, "COHOST_SWEARS", True) and CO_LANGUAGE_ON else CO_LANGUAGE_OFF
+
+
+def swears(text):
+    """The curse words in a line (to keep Cara clean, and Scratch too when his cursing is off)."""
+    out = []
+    for w in words(text):
+        w = w.strip("'")
+        if w.startswith(("fuck", "motherfuck", "shit", "bullshit")) or w in _STRONG_SWEARS:
+            out.append(w)
+    return out
+
+
+def too_far(text):
+    """Words he doesn't use even with his cursing on: classy, not crude."""
+    return any(w.startswith(("bitch", "motherfuck")) for w in swears(text))
 
 MOOD_LINES = {
     "chill": "CHILL: laid-back, warm and smooth, with dry wit and fewer exclamation marks. Still playful, never sleepy.",
@@ -297,11 +322,21 @@ def gemini(prompt):
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                json={"contents": [{"parts": [{"text": prompt}]}]},
+                # on-air banter (Scratch's shade, a roast battle) can read like harassment to the filter; only block the clear cases
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"}]},
                 timeout=30,
             )
             r.raise_for_status()
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+            j = r.json()
+            c = (j.get("candidates") or [{}])[0]
+            parts = (c.get("content") or {}).get("parts") or []
+            text = (parts[0].get("text") or "").strip() if parts else ""
+            if text:
+                return text
+            # nothing came back: say why, so a held-back draft shows up in the log
+            why = c.get("finishReason") or (j.get("promptFeedback") or {}).get("blockReason") or "empty reply"
+            print(f"Gemini model {model} wrote nothing ({why})")
         except Exception as e:
             print(f"Gemini model {model} failed: {e}")
     return None
@@ -1055,6 +1090,7 @@ def write_duo(style, ctx):
 CARA: {PERSONA}
 {bible()}
 {up}: {CO_PERSONA}
+{co_language()}
 {CO_BIBLE}
 {D.get("coIdentity", "")}
 {station_line()}
@@ -1087,6 +1123,11 @@ Write ONLY the dialogue: one line per turn, each starting with CARA: or {up}:"""
         raw = gemini(prompt if not feedback else prompt + f"\n\nYour previous draft can't be used: {feedback} Write a completely new one.")
         if raw is None:
             break
+        # a masked curse ("sh*t") gets read out as nonsense, so he says it in full or not at all
+        if _MASKED.search(raw):
+            feedback = "It hid a word behind asterisks. Write every word out in full, or pick a different word."
+            print(f"[rewrite {attempt + 1}: masked word]")
+            continue
         lines, used = [], []
         for who, text in parse_duo(raw):
             t, tg = clean_tags(tidy(text), set(TAGS))
@@ -1102,6 +1143,18 @@ Write ONLY the dialogue: one line per turn, each starting with CARA: or {up}:"""
         if "alex" in said and "alex" not in song_words:
             feedback = f"It called him Alex. His name is {CO_NAME}, {CO_SHORT} for short."
             print(f"[rewrite {attempt + 1}: wrong name]")
+            continue
+        if any(w == "CARA" and swears(t) for w, t in lines):
+            feedback = f"Cara swore. Only {CO_SHORT} curses; Cara keeps it clean."
+            print(f"[rewrite {attempt + 1}: Cara swore]")
+            continue
+        if not getattr(dj, "COHOST_SWEARS", True) and swears(joined):
+            feedback = "Keep it clean this time: no swearing from either of them."
+            print(f"[rewrite {attempt + 1}: swearing]")
+            continue
+        if too_far(joined):
+            feedback = f'{CO_SHORT} went too far. He can curse where it lands, but keep it classy: never "bitch" or "motherfucker".'
+            print(f"[rewrite {attempt + 1}: too crude]")
             continue
         if len(lines) < 2 or not any(w == up for w, _ in lines) or not any(w == "CARA" for w, _ in lines):
             feedback = f"It has to be a conversation: at least two lines, with both CARA: and {up}: speaking."
