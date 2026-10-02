@@ -214,6 +214,8 @@ def problem(text, recent, skip):
         return f"It opened with '{first}'. Open with a real word instead."
     if "gasp" in w or "sigh" in w or "sighs" in w:
         return "It used 'gasp' or 'sigh'. Leave those out."
+    if any(x.startswith(("snort", "sniff")) for x in w):
+        return "It had a snort or a sniff in it. Leave nose noises out completely."
     lab = says_label(text)
     if lab:
         return f"It said the word '{lab}'. Never call anything a slogan or tagline: just say the line itself."
@@ -271,11 +273,16 @@ def clean_tags(text, allowed):
     return out, used
 
 
+# snorts and sniffs written as a voice tag or a stage direction ("[snorts]", "(sniffs)", "*snort*")
+NOSE = re.compile(r"[\[\(\*]\s*(?:a |one |little |small |loud |quick )?(?:snort|sniff)\w*(?:[- ]\w+){0,3}\s*[\]\)\*]\s*", re.I)
+
+
 def tidy(t):
+    t = NOSE.sub("", t or "")
     try:
         return dj.tidy(t)
     except Exception:
-        return re.sub(r"\s{2,}", " ", t or "").strip()
+        return re.sub(r"\s{2,}", " ", t).strip()
 
 
 def gemini(prompt):
