@@ -61,7 +61,7 @@ MOOD_LINES = {
 }
 SITUATIONS = {
     "silent": "The music has stopped and the floor is all hers. She launches straight into her segment with confidence (never mention the silence or the music stopping) and brings the next song in at the end.",
-    "intro": "The next song has just started and she's talking over its opening. Lively, and she brings the song in at the end.",
+    "intro": "The next song has just started and she's talking over its opening. A quick, punchy drop-in (the song may kick in straight away, so never ramble), and she brings the song in at the end.",
     "talkover": "The current song is fading out under her voice. She rides the ending and rolls straight into the next song, no goodbyes or sign-offs.",
     "fadeout": "The current song is fading down under her voice. She takes over and rolls straight into the next song, no goodbyes or sign-offs.",
 }
@@ -813,8 +813,10 @@ def current_mood():
 
 
 def word_range(style):
-    silent = style == "silent"
     c = chattiness()
+    if style == "intro":   # over the start of a song she keeps it to a quick drop-in, so a song that kicks in straight away isn't buried
+        return {"quick": (8, 14), "normal": (10, 18)}.get(c, (12, 22))
+    silent = style == "silent"
     if c == "quick":
         return (20, 40) if silent else (12, 28)
     if c == "normal":
@@ -1204,6 +1206,22 @@ def render_duo(lines):
         w.setframerate(rate)
         w.writeframes(pcm.tobytes())
     return out
+
+
+def duo_ready():
+    """Alex needs the ElevenLabs voice and a Gemini key."""
+    return (getattr(dj, "TTS_ENGINE", "") == "elevenlabs" and bool(os.environ.get("GEMINI_API_KEY"))
+            and getattr(dj, "MODE", "gemini") == "gemini")
+
+
+def wants_duo():
+    """Rolled when a break is planned: is this one Cara and Alex together? (They always talk between songs.)"""
+    if not getattr(dj, "COHOST_ENABLED", True) or random.random() >= getattr(dj, "COHOST_CHANCE", 0.4):
+        return False
+    if not duo_ready():
+        print(f"[{CO_NAME} needs the ElevenLabs voice (VOICE: elevenlabs) and a Gemini key, so Cara takes it solo]")
+        return False
+    return True
 
 
 def maybe_duo(style, ctx, force=False):

@@ -237,8 +237,8 @@ DUCK_LEVEL = 0.2                   # song volume while she talks over it, as a f
 #   silent   : song ends, total silence, she speaks alone, then the next song kicks in
 #   fadeout  : song fades down under her voice, then the next song fades back in
 TRANSITIONS = {"talkover": 4, "intro": 3, "silent": 3, "fadeout": 2}
-TALK_OVER_MAX_MS = 10000           # talkover: never starts earlier than this before the song ends
-OVERLAP_INTO_NEXT_MS = 3000        # talkover: aim to still be talking this long into the next song
+TALK_OVER_MAX_MS = 25000           # talkover: never starts earlier than this before the song ends
+OVERLAP_INTO_NEXT_MS = 1000        # talkover: she finishes about this long into the next song (kept short: some songs start straight away)
 SILENT_PAUSE_MS = 700              # silent: pause the song this close to its end
 FADE_DOWN_MS = 1500                # fadeout: how long the song takes to fade under her
 ANNOUNCE_NEXT = True               # let her talk about the upcoming song/artist when she can
@@ -1105,13 +1105,14 @@ def elevenlabs_tts(text, path):
     print(f"ElevenLabs voice OK ({len(text)} characters used)")
 
 
-def make_clip(last_song, style="talkover", next_song=None, ctx=None):
-    try:
-        duo = brain.maybe_duo(style, ctx or {})   # sometimes Alex joins her
-        if duo:
-            return duo
-    except Exception as e:
-        print(f"{brain.CO_NAME} couldn't join this one ({e}), so Cara takes it solo.")
+def make_clip(last_song, style="talkover", next_song=None, ctx=None, duo=False):
+    if duo:   # Cara and Alex together (rolled when the break was planned, so it lands between songs)
+        try:
+            path = brain.maybe_duo(style, ctx or {}, force=True)
+            if path:
+                return path
+        except Exception as e:
+            print(f"{brain.CO_NAME} couldn't join this one ({e}), so Cara takes it solo.")
     text = write_break(last_song, style, next_song, ctx)
     print(f"[DJ:{style}] {text}")
     return synth_clip(text)
@@ -1550,8 +1551,8 @@ def new_params():
                 "fade_down": FADE_DOWN_MS, "fade_up": 1200}
     return {
         "duck": random.uniform(0.12, 0.30),               # how quiet the song gets
-        "talk_max": random.randint(8000, 12000),          # how early a talkover may start
-        "overlap": random.randint(2000, 5000),            # how far into the next song she talks
+        "talk_max": TALK_OVER_MAX_MS,                     # how early a talkover may start (early enough to finish with the song)
+        "overlap": random.randint(400, 1500),             # how far into the next song she talks (a beat at most)
         "fade_down": random.randint(1200, 2600),          # fadeout: how slowly the song sinks
         "fade_up": random.randint(900, 1800),             # how slowly the song comes back
     }
@@ -1608,16 +1609,30 @@ def start_ms_for(style, len_ms, p):
 RESTORE_VOL = None  # remembers the normal volume while she has the song turned down
 
 
-def run_transition(style, path, vol, uri, p=None):
+def run_transition(style, path, vol, uri, p=None, late=False):
     global RESTORE_VOL
-    RESTORE_VOL = vol if style != "silent" else None
+    RESTORE_VOL = vol if (style != "silent" and not late) else None
     try:
-        _run_transition(style, path, vol, uri, p or new_params())
+        _run_transition(style, path, vol, uri, p or new_params(), late)
     finally:
         RESTORE_VOL = None
 
 
-def _run_transition(style, path, vol, uri, p):
+def _run_transition(style, path, vol, uri, p, late=False):
+    if late:
+        # she missed the end of the last song: pause this one, talk, then play it from the top so its start isn't buried
+        sp.pause_playback()
+        try:
+            play_voice(path, p)
+        finally:
+            time.sleep(0.2)
+            try:
+                sp.seek_track(0)
+            except Exception as e:
+                print("Could not restart the song:", e)
+            time.sleep(0.3)
+            resume_spotify()
+        return
     if style == "silent":
         sp.pause_playback()
         try:
@@ -1772,12 +1787,12 @@ def main():
 
     next_break_after = roll_interval()
 
-    def build(song_name, last_info, style):
+    def build(song_name, last_info, style, duo=False):
         prepared["building"] = True
         try:
             nxt_info = get_next_track() if ANNOUNCE_NEXT else None
             ctx = {"last": last_info, "next": nxt_info}
-            path = make_clip(song_name, style, describe(nxt_info), ctx)
+            path = make_clip(song_name, style, describe(nxt_info), ctx, duo=duo)
             prepared["len_ms"] = clip_length_ms(path)
             prepared["style"] = style
             prepared["path"] = path
@@ -1987,10 +2002,16 @@ def main():
 
         # Start writing the break ~45s before the song ends
         if due and (remaining < 90000 or forced) and not prepared["path"] and not prepared["building"]:
-            style = (forced if can_duck else "silent") if forced else pick_style(can_duck, last_style)
+            # Cara and Alex always talk between songs (the music stops for them), so a song that starts straight
+            # away never ends up under their chat. A talk-over or intro you queued yourself stays Cara on her own.
+            duo = forced in (None, "silent") and brain.wants_duo()
+            if duo:
+                style = "silent"
+            else:
+                style = (forced if can_duck else "silent") if forced else pick_style(can_duck, last_style)
             prepared["params"] = new_params()
             prepared["uri"] = state["uri"]
-            threading.Thread(target=build, args=(state["name"], state["track"], style), daemon=True).start()
+            threading.Thread(target=build, args=(state["name"], state["track"], style, duo), daemon=True).start()
 
         # When it's time, run the chosen transition
         if due and prepared["path"]:
@@ -2000,7 +2021,7 @@ def main():
             if style == "fadeout" and remaining < start_ms - 1500:
                 style = "talkover"  # too late for a proper fade, just talk over it
                 start_ms = start_ms_for(style, prepared["len_ms"], p)
-            # the clip finished after its song ended: talk over the start of this song instead of skipping a break
+            # the clip finished after its song ended: this song waits for her, then starts again from the top
             late = bool(prepared.get("uri")) and prepared["uri"] != state["uri"] and style in ("talkover", "fadeout")
             if late:
                 style = "talkover"
@@ -2030,9 +2051,9 @@ def main():
                         print("[pop-in lined up for the next song]")
                 elif POPIN_ENABLED and style != "silent":
                     print(f"[no pop-in after this one ({int(POPIN_CHANCE * 100)}% chance each time)]")
-                print(f"[transition: {style}]")
+                print("[transition: late, so this song waits for her and starts again from the top]" if late else f"[transition: {style}]")
                 try:
-                    run_transition(style, path, vol, state["uri"], p)
+                    run_transition(style, path, vol, state["uri"], p, late=late)
                 finally:
                     try:
                         os.remove(path)
