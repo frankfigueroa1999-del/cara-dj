@@ -29,10 +29,11 @@ jobs:
           --icon app.ico
           --add-data "app.ico;."
           --add-data "my_stingers;my_stingers"
+          --add-data "station_beds;station_beds"
           --add-data "brain_data.json;."
           --add-data "ui;ui"
           --hidden-import live_dj_free --hidden-import brain --hidden-import pygame.sndarray
-          --hidden-import pc_spotify --hidden-import pc_audio --hidden-import pc_player --hidden-import clr
+          --hidden-import pc_spotify --hidden-import pc_audio --hidden-import pc_player --hidden-import pc_stingers --hidden-import clr
           --collect-all feedparser --collect-all edge_tts
           --collect-all webview --collect-all soundcard --collect-all clr_loader --collect-all pythonnet
           --exclude-module kokoro_onnx --exclude-module onnxruntime --exclude-module soundfile
@@ -72,4 +73,4 @@ jobs:
           gh release create desktop-latest dist/NonStopPopDJ.exe \
             --target "$GITHUB_SHA" \
             --title "Non Stop Pop DJ for Windows" \
-            --notes "The iPhone app, on your PC, now standalone: music plays right in the app, no Spotify app needed (Spotify Premium; it uses Spotify's own player in a hidden Edge window). Home, Cara, your Library, Search, album, artist and playlist pages, and a big player with synced lyrics and Up Next. Cara's full brain and her co-host MC Scratch. The visualizer (press V) has ten trippy scenes of its own plus 481 MilkDrop presets, and plays any .milk presets you drop in its folder. Download NonStopPopDJ.exe and double-click it. Windows may say it protected your PC (the app isn't signed): click More info, then Run anyway. The first time, Spotify asks you to Agree once more (for the built-in player). Your keys go in Settings once and are saved on your PC."
+            --notes "The iPhone app, on your PC, now standalone: music plays right in the app, no Spotify app needed (Spotify Premium; it uses Spotify's own player in an off-screen Chrome or Edge window). Home, Cara, your Library, Search, album, artist and playlist pages, and a big player with synced lyrics and Up Next. Cara's full brain and her co-host MC Scratch. Station stingers like the iPhone app: your stingers re-voiced with the name of whatever's playing. The visualizer (press V) has ten trippy scenes of its own plus 481 MilkDrop presets, and plays any .milk presets you drop in its folder. Download NonStopPopDJ.exe and double-click it. Windows may say it protected your PC (the app isn't signed): click More info, then Run anyway. The first time, Spotify asks you to Agree once more (for the built-in player). Your keys go in Settings once and are saved on your PC."

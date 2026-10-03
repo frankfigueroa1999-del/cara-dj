@@ -27,6 +27,10 @@ import requests
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
+try:
+    import pc_stingers   # station stingers: your stingers re-voiced with the name of what's playing (needs numpy)
+except Exception:
+    pc_stingers = None
 import brain   # Cara's brain (what she talks about, her memory, the station name, her co-host Scratch): shared with the iPhone app
 
 # ---------------- CONFIG: edit these ----------------
@@ -193,6 +197,7 @@ BREAKING_ENABLED = True
 DUCK_PERCENT = None                # song level while the DJ talks, % of normal (the app's slider sets this). None = automatic
 STINGER_VOLUME = 0.8               # how loud your stinger mp3s are (0.0 to 1.0); the app's STINGER VOLUME slider sets this
 SILENT_STINGER_PERCENT = 50        # % chance a silent transition starts with one of your stingers (before Cara speaks)
+STATION_STINGERS = True            # your stingers word for word, but naming the station after what's playing (like the iPhone app)
 STINGER_STANDALONE = False         # stingers only play in silent transitions
 FORCE_TRANSITION = None            # set to "talkover" / "intro" / "silent" / "fadeout" to force the next break's style
 DJ_VOLUME = 1.0                    # how loud Cara and the station tags are (0.0 to 1.0); the app's DJ VOLUME slider sets this
@@ -1398,6 +1403,60 @@ def pick_cached_stinger():
     return _last_tag
 
 
+def station_maker():
+    """The station-stinger maker, when station stingers are on (None when they're off, there's no ElevenLabs key for
+    the station voice, or they can't run here): your original stingers play instead."""
+    if not (STATION_STINGERS and pc_stingers is not None and os.environ.get("ELEVENLABS_API_KEY", "").strip()):
+        return None
+    return pc_stingers.MAKER
+
+
+def pick_stinger():
+    """The stinger before a silent break: one made for this station, or one of yours on plain Non Stop Pop."""
+    name, maker = brain.STATION.name(), station_maker()
+    if maker and name != brain.FALLBACK and not maker.failing_lately():
+        got = maker.ready(name)
+        if got:
+            return got
+        print(f"[no {brain.STATION.full()} stinger made yet, so none this time]")
+        warm_stingers()
+        return None
+    return pick_cached_stinger()
+
+
+def warm_stingers():
+    """Gets one more stinger made for the station that's playing, in the background (six per station, one at a time)."""
+    name, maker = brain.STATION.name(), station_maker()
+    if maker and STINGERS_ENABLED and SILENT_STINGER_PERCENT > 0 and name != brain.FALLBACK:
+        maker.warm(name)
+
+
+def test_stinger():
+    """Test button: this station's stinger (or one of yours on plain Non Stop Pop). None if there's nothing to play
+    yet: when one is being made, the button presses itself again the moment it's ready."""
+    name, maker = brain.STATION.name(), station_maker()
+    if maker and name != brain.FALLBACK:
+        got = maker.ready(name)
+        if got:
+            return got
+        if not maker.failing_lately():
+            print(f"[making a {brain.STATION.full()} stinger; it plays as soon as it's ready]")
+            maker.warm(name, then=lambda path: path and FORCE_STINGER.set())
+            return None
+    got = pick_cached_stinger()
+    if not got:
+        print("No stingers found. Put mp3 files in the my_stingers folder.")
+    return got
+
+
+def stinger_test_note():
+    """For the screen: the station a test stinger is about to be made for ("" when one plays right away)."""
+    name, maker = brain.STATION.name(), station_maker()
+    if maker and name != brain.FALLBACK and not maker.failing_lately() and maker.count(name) == 0:
+        return brain.STATION.full()
+    return ""
+
+
 def play_stinger_file(path):
     STATUS["speaking"] = True
     try:
@@ -1714,7 +1773,8 @@ def main():
     stinger = {"uri": None, "path": None, "at": 0}
     popin = {"armed": False, "uri": None, "at": 0, "path": None, "building": False, "forced": False}
     if STINGERS_ENABLED:
-        print(f"Stingers found: {len(stinger_files())} (played in silent transitions, before Cara speaks).")
+        print(f"Stingers found: {len(stinger_files())} (played in silent transitions, before Cara speaks)."
+              + (" Station stingers: on a named station, they're re-voiced with its name." if station_maker() else ""))
 
     def build_breaking():
         breaking["building"] = True
@@ -1856,6 +1916,7 @@ def main():
                     songs_since_breaking += 1
                     songs_since_voice += 1
                     stinger.update(uri=None, path=None)
+                    warm_stingers()       # the next station stinger gets made while this song plays
                     if popin["path"] and popin["uri"] != state["uri"] and not popin["forced"]:
                         drop_popin()
                     if popin["armed"] and POPIN_ENABLED and not popin["building"] and not popin["path"]:
@@ -1880,7 +1941,7 @@ def main():
                             and songs_since_voice >= 2 and songs_since_break < next_break_after
                             and breaking["uri"] != state["uri"] and not breaking["building"]):
                         if STINGER_TEST_MODE or random.random() < STINGER_CHANCE:
-                            tag = pick_cached_stinger()
+                            tag = pick_stinger()
                             if tag:
                                 stinger.update(uri=state["uri"], path=tag, at=random.randint(2000, 7000))
             else:
@@ -1966,9 +2027,7 @@ def main():
             if not can_duck:
                 print("Stingers need volume control on your Spotify device.")
             else:
-                tag = pick_cached_stinger()
-                if not tag:
-                    print("No stingers found. Put mp3 files in the my_stingers folder.")
+                tag = test_stinger()
                 if tag:
                     print("[stinger: test]")
                     songs_since_voice = 0
@@ -2046,7 +2105,7 @@ def main():
                 p["tag"] = None
                 p["intro_sting"] = None
                 if STINGERS_ENABLED and style == "silent" and random.random() * 100 < SILENT_STINGER_PERCENT:
-                    p["intro_sting"] = pick_cached_stinger()
+                    p["intro_sting"] = pick_stinger()
                     if p["intro_sting"]:
                         print("[stinger before Cara]")
                 if FORCE_TRANSITION:

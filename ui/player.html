@@ -9,7 +9,7 @@
 </style>
 </head>
 <body>
-<!-- Non Stop Pop DJ's built-in player. The app keeps this window hidden; it plays your music through Spotify's own
+<!-- Non Stop Pop DJ's built-in player. The app keeps this window off-screen (never hidden: a hidden page loads no sound); it plays your music through Spotify's own
      Web Playback SDK, and closes itself when the app goes away. -->
 <b>Non Stop Pop DJ</b>
 <div id="status">Starting the player…</div>
@@ -67,6 +67,26 @@
     return st ? 'ready (paused)' : 'ready';
   };
 
+  // The app's play/pause/skip buttons, straight to the player (each gives up after 4 seconds rather than hang)
+  window.__ctl = async (action, value) => {
+    if (!player) return 'no player';
+    const within = p => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('the player took too long')), 4000))]);
+    try { await player.activateElement(); } catch (e) { /* not needed everywhere */ }
+    const n = Number(value) || 0;
+    const run = {
+      toggle: () => player.togglePlay(), play: () => player.resume(), pause: () => player.pause(),
+      next: () => player.nextTrack(), previous: () => player.previousTrack(),
+      seek: () => player.seek(Math.max(0, Math.round(n))), volume: () => player.setVolume(Math.max(0, Math.min(1, n / 100))),
+    }[action];
+    if (!run) return 'unknown';
+    await within(run());
+    const st = await within(player.getCurrentState()).catch(() => null);
+    return st ? (st.paused ? 'paused' : 'playing') : 'ok';
+  };
+
+  // a hidden page loads no sound (the browser waits until it's looked at), so say whenever that changes
+  document.addEventListener('visibilitychange', () => post('log', { message: `the player page is now ${document.visibilityState}` }));
+
   // what this browser can do, for the app's Activity log
   (async () => {
     const d = {};
@@ -77,6 +97,7 @@
     } catch (e) { d.widevine = `missing (${e.name})`; }
     try { const ac = new AudioContext(); d.sound = ac.state; ac.close(); } catch (e) { d.sound = `error (${e.name})`; }
     d.browser = (navigator.userAgent.match(/Edg\/[\d.]+|Chrome\/[\d.]+/) || ['?'])[0];
+    d.page = document.visibilityState;
     post('diag', d);
   })();
 
@@ -86,7 +107,7 @@
   // check in with the app every few seconds: if it's gone or wants the player off, disconnect and close
   setInterval(async () => {
     try {
-      const j = await (await fetch(`/ping?k=${key}`)).json();
+      const j = await (await fetch(`/ping?k=${key}&vis=${document.visibilityState}`)).json();
       misses = 0;
       if (j.stop) { if (player) player.disconnect(); player = null; window.close(); }
     } catch (e) {

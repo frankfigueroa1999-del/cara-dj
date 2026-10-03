@@ -308,8 +308,13 @@ VIEWS.cara = {
         ${c.duck_auto ? '' : `<div class="set-row"><span>Music level while she talks</span><span class="val">${c.duck_percent}%</span></div>${slider('duck_percent')}`}
         <div class="hair"></div>
         <div class="set-row"><span>Stingers before silent breaks</span><span class="val">${c.stinger_chance}%</span>${step('stinger_chance', 5, 0, 100)}</div><div class="hair"></div>
-        <div class="set-row"><span>Station tags in her voice</span>${tog('stingers')}</div>
-        <button class="link" data-act="open-stingers">${icon('folder', 16)}Open my stingers folder</button></div>
+        <div class="set-row"><span>Stingers</span>${tog('stingers')}</div>
+        ${c.stingers ? `<div class="hair"></div><div class="set-row"><span>Station stingers</span>${tog('station_stingers')}</div>
+        ${c.station_stingers ? `<button class="link" data-act="restinger">${icon('refresh', 16)}Re-record stingers</button>` : ''}` : ''}
+        <button class="link" data-act="open-stingers">${icon('folder', 16)}Open my stingers folder</button>
+        <div class="foot">${!c.stingers ? 'Turn on stingers to start silent breaks with one now and then.' : c.station_stingers
+          ? "Silent breaks start with a stinger this often. Station stingers are your stingers word for word, with the name of whatever's playing in place of Non-Stop-Pop, read by the station voice (Settings). On plain Non Stop Pop, your originals play."
+          : 'Silent breaks start with one of your stingers this often.'}</div></div>
       <div class="card-box"><h3>${icon('news', 20)}Breaking News</h3>
         <div class="set-row"><span>Now and then, a breaking-news interruption</span>${tog('breaking_enabled')}</div><div class="hair"></div>
         <div class="set-row"><span>Test mode (every song)</span>${tog('breaking_test')}</div></div>
@@ -845,6 +850,8 @@ function settingsSheet() {
       <div class="field"><label>Model</label><div class="box"><select data-key="eleven_model">${[['eleven_v4', 'Eleven v4 (most expressive)'], ['eleven_v4_turbo', 'Eleven v4 Turbo (faster)'], ['eleven_multilingual_v2', 'Multilingual v2 (older)']].map(([v, l]) => `<option value="${v}" ${c.eleven_model === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div></div>
     <div class="group"><div class="caps">Scratch's voice (co-host)</div>
       ${field("Scratch's Voice ID", 'cohost_voice', { ph: 'Leave blank for a deep, warm radio voice', hint: 'Add any voice from the ElevenLabs Voice Library to My Voices and paste its ID here.' })}</div>
+    <div class="group"><div class="caps">Station voice (stingers)</div>
+      ${field('Station Voice ID', 'station_voice', { ph: 'Leave blank for the default announcer', hint: 'The announcer on your station stingers. Add any voice from the ElevenLabs Voice Library to My Voices, then paste its ID here.' })}</div>
     <div class="group"><div class="caps">Her words (Gemini)</div>
       ${field('Gemini API key', 'gemini_api_key', { secret: true, ph: 'Paste it here', hint: 'A free key from <button class="link" data-set="aistudio">Google AI Studio</button>. Without one she still talks, with simpler lines.' })}</div>
     <div class="group"><div class="caps">Your town</div>${field('Town', 'city', { ph: 'Yakima, Washington', hint: 'Town, State. For local news and weather.' })}</div>
@@ -891,7 +898,7 @@ const ACTIONS = {
   'row-scroll': el => { const row = el.parentElement.querySelector('.row'); row.scrollBy({ left: +el.dataset.dir * row.clientWidth * 0.8, behavior: 'smooth' }); },
   'play-ctx': el => {
     const n = now();
-    if (n && n.context === el.dataset.ctx && !el.dataset.shuffle) return api.player('toggle').then(poke);
+    if (n && n.context === el.dataset.ctx && !el.dataset.shuffle) return cmd('toggle');
     play({ context: el.dataset.ctx, shuffle: el.dataset.shuffle ? true : null });
   },
   'play-liked': el => { const id = myId(); if (id) play({ context: `spotify:user:${id}:collection`, shuffle: el.dataset.shuffle ? true : null }); else toast('Connect Spotify first.', 'warning'); },
@@ -916,6 +923,7 @@ const ACTIONS = {
   'connect': () => api.connect(false).then(poke),
   'open-spotify': () => api.open_spotify(),
   'open-stingers': () => api.open_stingers(),
+  'restinger': () => api.restinger().then(r => toast(r === true ? 'New takes on the way' : "Couldn't start over", r === true ? 'bolt' : 'warning')),
   'dj-toggle': async () => {
     const r = await api.dj_toggle();
     if (r === 'connect') toast('Connecting to Spotify first…', 'link');
@@ -923,7 +931,7 @@ const ACTIONS = {
     else if (r === 'stopping') toast('Cara is signing off', 'stop');
     poke();
   },
-  'dj-test': async el => { const r = await api.dj_test(el.dataset.what); if (r !== 'ok') toast(r, 'warning'); else toast({ popin: 'Cara pops in now', duo: 'Cara and Scratch, coming up', stinger: 'Stinger!', break: 'Breaking news, coming up' }[el.dataset.what] || 'OK', 'bolt'); },
+  'dj-test': async el => { const r = await api.dj_test(el.dataset.what); if (typeof r === 'string' && r.startsWith('making:')) toast(`Making a ${r.slice(7)} stinger…`, 'bolt'); else if (r !== 'ok') toast(r, 'warning'); else toast({ popin: 'Cara pops in now', duo: 'Cara and Scratch, coming up', stinger: 'Stinger!', break: 'Breaking news, coming up' }[el.dataset.what] || 'OK', 'bolt'); },
   'dj-queue': async el => { const r = await api.dj_queue(el.dataset.style); if (r !== 'ok') toast(r, 'warning'); poke(); },
   'cfg': el => setConfig({ [el.dataset.key]: el.dataset.val }),
   'cfg-toggle': el => setConfig({ [el.dataset.key]: !S.config[el.dataset.key] }),
@@ -945,6 +953,14 @@ async function setConfig(patch) {
   if (res && res.config) { S.config = res.config; if (S.route.name === 'cara') refresh(); }
 }
 function poke() { setTimeout(pollOnce, 250); }
+// play/pause/skip and friends: says so when it didn't work, then refreshes
+function cmd(action, value) {
+  return api.player(action, value).then(r => {
+    if (r !== true) toast(typeof r === 'string' && r ? r : (r && r.error) || "Spotify didn't answer. Try again.", 'warning');
+    poke();
+    return r === true;
+  });
+}
 
 document.addEventListener('click', e => {
   if (!e.target.closest('#menu')) closeMenu();
@@ -979,9 +995,9 @@ document.addEventListener('keydown', e => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement && document.activeElement.tagName);
   if (e.key === 'Escape') { if ($('#menu')) return closeMenu(); if ($('#sheet-wrap')) return closeSheet(); if (Vis.isOpen) return Vis.close(); if (S.np.open) return closeNP(); }
   if (typing) { if (e.key === 'Enter' && e.target.id === 'search-input' && S.search.q.trim()) api.remember_search(S.search.q).then(l => { if (Array.isArray(l)) S.config.recent_searches = l; }); return; }
-  if (e.key === ' ') { e.preventDefault(); api.player('toggle').then(poke); }
-  else if (e.key === 'ArrowRight' && e.ctrlKey) api.player('next').then(poke);
-  else if (e.key === 'ArrowLeft' && e.ctrlKey) api.player('previous').then(poke);
+  if (e.key === ' ') { e.preventDefault(); cmd('toggle'); }
+  else if (e.key === 'ArrowRight' && e.ctrlKey) cmd('next');
+  else if (e.key === 'ArrowLeft' && e.ctrlKey) cmd('previous');
   else if (e.key === 'ArrowLeft' && e.altKey) goBack();
   else if (e.key === 'ArrowRight' && e.altKey) goForward();
   else if (e.key.toLowerCase() === 'v' && !e.ctrlKey) Vis.isOpen ? Vis.close() : Vis.open();
@@ -1121,13 +1137,13 @@ async function start() {
   const vol = $('#bar-vol');
   vol.addEventListener('change', () => { vol.dataset.t = Date.now(); api.player('volume', +vol.value); });
   $('#bar-mute').addEventListener('click', () => { const v = +vol.value ? 0 : 60; vol.value = v; paintRange(vol); vol.dataset.t = Date.now(); api.player('volume', v); });
-  $('#bar-play').addEventListener('click', () => api.player('toggle').then(poke));
-  $('#np-play').addEventListener('click', () => api.player('toggle').then(poke));
+  $('#bar-play').addEventListener('click', () => cmd('toggle'));
+  $('#np-play').addEventListener('click', () => cmd('toggle'));
   for (const p of ['bar', 'np']) {
-    $(`#${p}-next`).addEventListener('click', () => api.player('next').then(poke));
-    $(`#${p}-prev`).addEventListener('click', () => { if (progressNow() > 3000) api.player('seek', 0).then(poke); else api.player('previous').then(poke); });
-    $(`#${p}-shuffle`).addEventListener('click', () => api.player('shuffle', !(now() && now().shuffle)).then(poke));
-    $(`#${p}-repeat`).addEventListener('click', () => { const r = (now() && now().repeat) || 'off'; api.player('repeat', r === 'off' ? 'context' : r === 'context' ? 'track' : 'off').then(poke); });
+    $(`#${p}-next`).addEventListener('click', () => cmd('next'));
+    $(`#${p}-prev`).addEventListener('click', () => { if (progressNow() > 3000) cmd('seek', 0); else cmd('previous'); });
+    $(`#${p}-shuffle`).addEventListener('click', () => cmd('shuffle', !(now() && now().shuffle)));
+    $(`#${p}-repeat`).addEventListener('click', () => { const r = (now() && now().repeat) || 'off'; cmd('repeat', r === 'off' ? 'context' : r === 'context' ? 'track' : 'off'); });
     $(`#${p}-like`).addEventListener('click', () => { const t = nowTrack(); if (t) toggleLike(t.uri); });
   }
   $('#bar-art').addEventListener('click', () => openNP());

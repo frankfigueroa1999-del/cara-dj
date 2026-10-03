@@ -21,6 +21,7 @@ import webbrowser
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pc_audio  # noqa: E402  (listens to the speakers only while the visualizer is open)
+import pc_stingers  # noqa: E402  (station stingers: your stingers, re-voiced with the name of what's playing)
 import pc_player  # noqa: E402  (the built-in player: music plays from the app, no Spotify app needed)
 import pc_spotify  # noqa: E402  (plain module: nothing in it talks to Spotify until the app connects)
 
@@ -76,6 +77,8 @@ DEFAULTS = {
     "duck_auto": True,
     "duck_percent": 20,
     "stinger_chance": 35,
+    "station_stingers": True,   # your stingers re-voiced with the name of what's playing (like the iPhone app)
+    "station_voice": "",        # the ElevenLabs voice on station stingers ("" for the default announcer)
     "mood": "normal",
     "chattiness": "chatty",
     "cohost_enabled": True,
@@ -210,9 +213,11 @@ class App:
         self.sleep_uri = None
         self.window = None
         self.poke = threading.Event()
-        self.player = pc_player.Player(APP_DIR, os.path.join(HERE, "ui", "player.html"), self.player_token, self.player_changed)
+        os.environ.setdefault("DJ_STINGER_DIR", os.path.join(APP_DIR, "stingers"))   # station stingers live here too
+        self.builtin = pc_player.Player(APP_DIR, os.path.join(HERE, "ui", "player.html"), self.player_token, self.player_changed)
         self.sound_watch = None         # listening for the built-in player's sound after it starts playing
         self.sound_heard = False
+        self.sound_repaired = False     # started the player over once already because it was silent
         threading.Thread(target=self.poll_loop, daemon=True).start()
         if self.cfg["spotify_client_id"] and self.cfg["spotify_client_secret"]:
             if not self.cfg.get("welcomed"):
@@ -243,7 +248,7 @@ class App:
             if k == "player" and v not in ("app", "spotify"):
                 continue
             if k == "player" and v != self.cfg.get(k) and self.connected:
-                threading.Thread(target=self.player.start if v == "app" else self.leave_builtin, daemon=True).start()
+                threading.Thread(target=self.builtin.start if v == "app" else self.leave_builtin, daemon=True).start()
             self.cfg[k] = v
         c = self.cfg
         c["break_min"] = max(1, min(10, int(c["break_min"])))
@@ -278,6 +283,9 @@ class App:
         dj.STINGER_VOLUME = int(c.get("stinger_volume", 80)) / 100.0
         dj.DUCK_PERCENT = None if c.get("duck_auto", True) else int(c.get("duck_percent", 20))
         dj.STINGER_CHANCE = int(c.get("stinger_chance", 35)) / 100.0
+        dj.SILENT_STINGER_PERCENT = int(c.get("stinger_chance", 35))      # "Stingers before silent breaks"
+        dj.STATION_STINGERS = bool(c.get("station_stingers", True))
+        os.environ["DJ_STATION_VOICE"] = (c.get("station_voice") or "").strip()
         dj.DJ_MOOD = c.get("mood", "normal")
         dj.CHATTINESS = c.get("chattiness", "chatty")
         dj.COHOST_ENABLED = bool(c.get("cohost_enabled", True))
@@ -335,7 +343,7 @@ class App:
                 pc_spotify.forget_home()
                 print("Connected to Spotify.")
                 if self.cfg.get("player", "app") == "app":
-                    self.player.start()
+                    self.builtin.start()
             except Exception as e:
                 self.connected = False
                 msg = str(e)
@@ -356,7 +364,7 @@ class App:
     def logout(self):
         if self.dj_running():
             self.dj.STOP.set()
-        threading.Thread(target=self.player.stop, daemon=True).start()
+        threading.Thread(target=self.builtin.stop, daemon=True).start()
         try:
             os.remove(CACHE_PATH)
         except OSError:
@@ -386,17 +394,17 @@ class App:
     def leave_builtin(self):
         """Switching to the Spotify app: hand the music over first (if the Spotify app is open), then stop the player."""
         n = self.now or {}
-        if self.player.device_id and (n.get("device") or {}).get("id") == self.player.device_id:
-            devs = [d for d in pc_spotify.devices() if d["id"] != self.player.device_id and not d["restricted"]]
+        if self.builtin.device_id and (n.get("device") or {}).get("id") == self.builtin.device_id:
+            devs = [d for d in pc_spotify.devices() if d["id"] != self.builtin.device_id and not d["restricted"]]
             pick = next((d for d in devs if d["type"] == "computer"), None) or (devs[0] if devs else None)
             if pick:
                 pc_spotify.safe(lambda: pc_spotify.put("me/player", payload={"device_ids": [pick["id"]], "play": bool(n.get("playing"))}))
-        self.player.stop()
+        self.builtin.stop()
         self.poke.set()
 
     def check_sound(self, pb):
         """Spotify says the built-in player is playing: is sound actually coming out? (listens to the speakers)"""
-        p, t = self.player, (pb or {}).get("track") or {}
+        p, t = self.builtin, (pb or {}).get("track") or {}
         here = p.status == "ready" and p.device_id and ((pb or {}).get("device") or {}).get("id") == p.device_id
         if self.sound_heard or not (here and pb.get("playing")):
             self.sound_watch = None
@@ -412,22 +420,34 @@ class App:
                 self.sound_heard = True
             return
         if ear.vol > 0.03 or ear.bass > 0.1:
-            self.sound_heard, self.sound_watch = True, None
+            self.sound_heard, self.sound_watch, self.sound_repaired = True, None, False
             print("[player: sound check passed: the music is coming out]")
         elif waited > 7 and not w["nudged"]:
             w["nudged"] = True
             threading.Thread(target=p.unlock, args=("no sound yet",), daemon=True).start()
         elif waited > 18:
             self.sound_watch = None
-            p.no_sound(f"silent for {int(waited)} seconds while Spotify said it was playing")
+            detail = f"silent for {int(waited)} seconds while Spotify said it was playing"
+            if not self.sound_repaired:                  # first time: start the player over, which usually sorts it
+                self.sound_repaired = True
+
+                def again():
+                    print(f"[player: no sound yet ({detail}); page: {p.vis or '?'}; Spotify's frame: {p.media()}; "
+                          "starting the built-in player over]")
+                    p.retry()
+                threading.Thread(target=again, daemon=True).start()
+            else:
+                threading.Thread(target=p.no_sound, args=(detail,), daemon=True).start()
 
     def use_builtin(self, force=False):
         """Point Spotify at the built-in player, unless music is already playing on another device (or when asked)."""
-        dev = self.player.device_id
+        dev = self.builtin.device_id
         if not (dev and self.connected):
             return False
         n = self.now or {}
-        if not force and n.get("playing") and (n.get("device") or {}).get("id") not in (None, dev):
+        d = n.get("device") or {}
+        ours = d.get("id") in (None, dev) or d.get("id") in self.builtin.past_ids or d.get("name") == pc_player.NAME
+        if not force and n.get("playing") and not ours:       # leave music that's playing on another device alone
             return False
         keep = bool(n.get("playing"))
         ok = pc_spotify.safe(lambda: pc_spotify.put("me/player", payload={"device_ids": [dev], "play": keep}) or True, False)
@@ -464,8 +484,14 @@ class App:
             self.dj.FORCE_TRANSITION = self.dj.FORCE_TRANSITION or "talkover"
             return "ok"
         if ev:
+            note = ""
+            if what == "stinger":
+                try:
+                    note = self.dj.stinger_test_note()      # a station stinger has to be made first
+                except Exception:
+                    note = ""
             getattr(self.dj, ev).set()
-            return "ok"
+            return f"making:{note}" if note else "ok"
         return "unknown"
 
     def queue_next(self, style):
@@ -570,11 +596,24 @@ class App:
             self.sleep_at, self.sleep_end_of_song = time.time() + minutes * 60, False
 
     def player(self, action, value=None):
+        """The play/pause/skip buttons. True when it worked, otherwise a few words on why not (the screen shows them)."""
         if not (self.connected and self.dj is not None):
-            return False
+            return "Connect Spotify first."
         n = self.now or {}
         dev = (n.get("device") or {}).get("id")
         q = {"device_id": dev} if dev else {}
+        b = self.builtin
+        if (dev and dev == b.device_id and b.status == "ready"
+                and action in ("toggle", "play", "pause", "next", "previous", "seek", "volume")):
+            try:                                        # playing in this app: straight to the player, no round trip
+                got = b.control(action, value)
+                if action == "toggle" and self.now and got in ("playing", "paused"):
+                    self.now["playing"], self.now["stamp"] = got == "playing", int(time.time() * 1000)
+                    action = ""                         # already up to date
+                self._commanded(action, value, n)
+                return True
+            except Exception as e:
+                print(f"[player: the built-in player couldn't {action} by itself ({e}); asking Spotify instead]")
         f = {
             "toggle": lambda: pc_spotify.put("me/player/pause" if n.get("playing") else "me/player/play", **q),
             "play": lambda: pc_spotify.put("me/player/play", **q),
@@ -587,9 +626,29 @@ class App:
             "repeat": lambda: pc_spotify.put("me/player/repeat", state=value or "off"),
         }.get(action)
         if not f:
-            return False
-        ok = pc_spotify.safe(lambda: f() or True, False)
-        if ok and self.now:
+            return "That button doesn't do anything yet."
+        try:
+            f()
+        except Exception as e:
+            status = getattr(e, "http_status", None)
+            print(f"Spotify said no ({status or 'no answer'}): {str(e)[:200]}")
+            threading.Timer(0.35, self.poke.set).start()
+            low = str(e).lower()
+            if status == 404 or "no active device" in low:
+                return "Nothing's playing anywhere right now. Pick a song first."
+            if status == 403 or "restriction" in low:
+                return "Spotify won't do that right now."
+            if status == 401:
+                return "Spotify wants you to reconnect: Settings, Reconnect Spotify."
+            if status == 429:
+                return "Spotify's busy. Try again in a moment."
+            return "Spotify didn't answer. Try again."
+        self._commanded(action, value, n)
+        return True
+
+    def _commanded(self, action, value, n):
+        """Show a button's effect right away (Spotify's own answer follows a moment later)."""
+        if self.now:
             if action == "toggle":
                 self.now["playing"] = not n.get("playing")
                 self.now["stamp"] = int(time.time() * 1000)
@@ -600,22 +659,23 @@ class App:
             elif action == "seek":
                 self.now["progress"], self.now["stamp"] = int(value or 0), int(time.time() * 1000)
         threading.Timer(0.35, self.poke.set).start()
-        return bool(ok)
 
     def play(self, context=None, offset_uri=None, uris=None, position=None, shuffle=None):
         if not (self.connected and self.dj is not None):
             return "Connect Spotify first."
         n = self.now or {}
         dev = (n.get("device") or {}).get("id")
-        builtin = self.player.device_id if (self.cfg.get("player", "app") == "app" and self.player.status == "ready") else None
-        if builtin and not (n.get("playing") and dev and dev != builtin):
+        builtin = self.builtin.device_id if (self.cfg.get("player", "app") == "app" and self.builtin.status == "ready") else None
+        elsewhere = (dev and dev != builtin and dev not in self.builtin.past_ids
+                     and (n.get("device") or {}).get("name") != pc_player.NAME)
+        if builtin and not (n.get("playing") and elsewhere):
             dev = builtin                 # play in this app, unless music is already playing on another device
         if not dev:
             devs = pc_spotify.devices()
             pick = next((d for d in devs if d["active"]), None) or next((d for d in devs if d["type"] == "computer"), None) or (devs[0] if devs else None)
             dev = pick["id"] if pick else None
             if not dev:
-                if self.cfg.get("player", "app") == "app" and self.player.status == "starting":
+                if self.cfg.get("player", "app") == "app" and self.builtin.status == "starting":
                     return "The built-in player is still starting. Try again in a few seconds."
                 return "Spotify isn't open anywhere. Open the Spotify app on this PC, then try again."
         body = {}
@@ -686,7 +746,7 @@ class App:
                 "queued": self.queued if running else None,
             },
             "sleep": {"at": int(self.sleep_at * 1000) if self.sleep_at else None, "endOfSong": self.sleep_end_of_song},
-            "player": dict(self.player.info(), mode=self.cfg.get("player", "app")),
+            "player": dict(self.builtin.info(), mode=self.cfg.get("player", "app")),
             "logCount": count,
             "serverTime": int(time.time() * 1000),
         }
@@ -698,7 +758,7 @@ class App:
         except Exception:
             pass
         try:
-            self.player.stop()
+            self.builtin.stop()
         except Exception:
             pass
 
@@ -763,6 +823,13 @@ class Api:
         return folder
 
     @guard
+    def restinger(self):
+        """Re-record stingers: the station voice reads every line again (new takes, or a new voice)."""
+        pc_stingers.MAKER.clear_all()
+        print("[station stingers: starting over, new takes on the way]")
+        return True
+
+    @guard
     def open_spotify(self):
         try:
             webbrowser.open("spotify:")
@@ -802,12 +869,12 @@ class Api:
 
     @guard
     def player_retry(self):
-        threading.Thread(target=self._app.player.retry, daemon=True).start()
+        threading.Thread(target=self._app.builtin.retry, daemon=True).start()
         return True
 
     @guard
     def use_builtin(self):
-        if self._app.player.status != "ready":
+        if self._app.builtin.status != "ready":
             return False
         return self._app.use_builtin(force=True)
 
@@ -1051,6 +1118,21 @@ def self_test(path):
         bundled = [n for n in os.listdir(os.path.join(HERE, "my_stingers")) if n.lower().endswith(".mp3")]
         if len(bundled) < 6:
             raise RuntimeError(f"only {len(bundled)} stingers inside the app")
+        beds = [n for n in os.listdir(pc_stingers.BEDS) if n.endswith(".ogg")] if os.path.isdir(pc_stingers.BEDS) else []
+        if len(beds) < 6:
+            raise RuntimeError(f"only {len(beds)} station stinger beds inside the app")
+        import pygame
+        if pygame.mixer.get_init():           # this build reads the beds and the voice's mp3s, and mixes a stinger
+            music, rate = pc_stingers.decode(os.path.join(pc_stingers.BEDS, "stationbed_1.ogg"))
+            line, _ = pc_stingers.decode(os.path.join(HERE, "my_stingers", sorted(bundled)[0]))
+            if len(music[0]) < rate * 5 or len(line[0]) < rate:
+                raise RuntimeError("the station stinger music didn't decode")
+            voice = pc_stingers.mono(line)[: rate * 2]
+            left, _ = pc_stingers.render(music, [(voice, 0.1, False), (voice[: rate], 4.9, True)], -21.5, rate)
+            if len(left) < len(music[0]) or not 0.05 < float(abs(left).max()) <= 0.98:
+                raise RuntimeError("the station stinger mix came out wrong")
+        else:
+            print("[self-test: no sound system on this machine, so the stinger mix wasn't tried]")
         # the visualizer's listener loads soundcard in its own thread, which sets Windows audio up by itself
         # (a runner may have no speakers; what must never happen is that setup failing, "Error 0x100000001")
         listener = pc_audio.LISTENER
@@ -1075,11 +1157,14 @@ def self_test(path):
         api = Api(app)
         # the built-in player: Edge (or Chrome) is there, and the page's little server answers (no browser is opened)
         if sys.platform == "win32" and not pc_player.find_browser()[1]:
-            raise RuntimeError("couldn't find Microsoft Edge for the built-in player")
+            raise RuntimeError("couldn't find Chrome or Edge for the built-in player")
+        with open(os.path.join(HERE, "ui", "player.html"), encoding="utf-8") as f:   # how its window is recognised
+            if f"<title>{pc_player.PAGE_TITLE}</title>" not in f.read():
+                raise RuntimeError("the player page's title doesn't match what the app looks for")
         import urllib.request
-        page = app.player._serve()
+        page = app.builtin._serve()
         ping = page.replace("/player?", "/ping?")
-        with urllib.request.urlopen(urllib.request.Request(ping, headers={"Host": f"127.0.0.1:{app.player.port}"}), timeout=10) as r:
+        with urllib.request.urlopen(urllib.request.Request(ping, headers={"Host": f"127.0.0.1:{app.builtin.port}"}), timeout=10) as r:
             if json.loads(r.read()).get("name") != pc_player.NAME:
                 raise RuntimeError("the built-in player's page server didn't answer")
         s = api.state()

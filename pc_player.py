@@ -3,10 +3,13 @@ The built-in player: music plays from this app, without the Spotify app.
 
 Spotify's own Web Playback SDK turns a web page into a Spotify Connect speaker. It needs Spotify Premium and a browser
 with Widevine (Spotify's copy protection). The app's window (Microsoft WebView2) has no Widevine, so the player page
-runs in a hidden Microsoft Edge window (Edge is part of Windows; Chrome is used if Edge isn't there), with its own
-profile so it never touches your normal browsing. The page gets Spotify tokens from this app through a small server
-on 127.0.0.1 guarded by a random key, says when it's ready, and closes itself if the app goes away. Windows also ends
-it with the app (a job object), even if the app crashes.
+runs in its own Google Chrome window (Chrome carries Widevine; Microsoft Edge, part of Windows, is used when Chrome
+isn't installed), with its own profile so it never touches your normal browsing. The page gets Spotify tokens from
+this app through a small server on 127.0.0.1 guarded by a random key, says when it's ready, and closes itself if the
+app goes away. Windows also ends it with the app (a job object), even if the app crashes.
+
+The window is kept off-screen and off the taskbar, but never hidden: Chrome and Edge don't load any sound in a page
+that's hidden and has never been seen (they wait until you look at it), so a hidden player plays silence.
 """
 import base64
 import ctypes
@@ -29,22 +32,22 @@ NAME = "Non Stop Pop DJ"          # the speaker's name in Spotify's device list
 
 
 def find_browser():
-    """(name, path) of Edge or Chrome, or (None, None)."""
+    """(name, path) of Chrome or Edge, or (None, None). Chrome first: it ships with Widevine, while Edge downloads it."""
     places = []
-    for env in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
-        base = os.environ.get(env)
-        if base:
-            places.append(("Edge", os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe")))
     for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
         base = os.environ.get(env)
         if base:
             places.append(("Chrome", os.path.join(base, "Google", "Chrome", "Application", "chrome.exe")))
+    for env in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            places.append(("Edge", os.path.join(base, "Microsoft", "Edge", "Application", "msedge.exe")))
     for name, path in places:
         if os.path.isfile(path):
             return name, path
     try:
         import winreg
-        for name, exe in (("Edge", "msedge.exe"), ("Chrome", "chrome.exe")):
+        for name, exe in (("Chrome", "chrome.exe"), ("Edge", "msedge.exe")):
             for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
                 try:
                     with winreg.OpenKey(hive, rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}") as k:
@@ -108,25 +111,65 @@ def _tie_to_app(proc):
     return None
 
 
-def _hide_windows(pid):
-    """Hide the player's window (and anything else that browser opens). Returns how many it hid."""
+class _Rect(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+
+PAGE_TITLE = "Non Stop Pop DJ player"     # player.html's <title>: how the player's own window is recognised
+_FAR = -32000                            # off every screen
+_SWP = 0x0001 | 0x0004 | 0x0010          # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+
+
+def _tuck_windows(pid, tucked):
+    """Keep the browser's windows out of sight WITHOUT hiding them (a hidden page loads no sound): each one moves
+    off-screen and becomes a tool window, which keeps it off the taskbar and out of Alt+Tab. `tucked` remembers the
+    ones already done. If the player's own window got hidden or minimized, it's shown again (still off-screen).
+    Returns True when the player's window is in place."""
+    seen = False
     try:
         user32 = ctypes.windll.user32
-        hidden = []
+        get_ex = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+        set_ex = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+        get_ex.restype, get_ex.argtypes = ctypes.c_ssize_t, [ctypes.c_void_p, ctypes.c_int]
+        set_ex.restype, set_ex.argtypes = ctypes.c_ssize_t, [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
         proc_t = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
         def each(hwnd, _):
+            nonlocal seen
+            h = ctypes.c_void_p(hwnd)
             owner = ctypes.c_ulong()
-            user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(owner))
-            if owner.value == pid and user32.IsWindowVisible(ctypes.c_void_p(hwnd)):
-                user32.ShowWindow(ctypes.c_void_p(hwnd), 0)        # SW_HIDE: not on screen, not on the taskbar
-                hidden.append(hwnd)
+            user32.GetWindowThreadProcessId(h, ctypes.byref(owner))
+            if owner.value != pid:
+                return True
+            title = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(h, title, 256)
+            mine = PAGE_TITLE in title.value
+            visible = bool(user32.IsWindowVisible(h))
+            if hwnd not in tucked:
+                if not visible:
+                    return True                                   # the browser's own invisible helper windows
+                ex = get_ex(h, -20)                               # GWL_EXSTYLE
+                set_ex(h, -20, (ex | 0x80 | 0x08000000) & ~0x40000)   # + tool window, + no-activate, - app window
+                user32.ShowWindow(h, 0)                           # the taskbar lets go of it while it's away...
+                user32.SetWindowPos(h, None, _FAR, _FAR, 0, 0, _SWP)
+                user32.ShowWindow(h, 4)                           # ...and it's back (SW_SHOWNOACTIVATE), off-screen
+                tucked.add(hwnd)
+            else:
+                if not visible and not mine:
+                    return True                                   # a bubble the browser closed: leave it be
+                if mine and (not visible or user32.IsIconic(h)):
+                    user32.ShowWindow(h, 4)                       # hidden or minimized: sound would stop loading
+                r = _Rect()
+                user32.GetWindowRect(h, ctypes.byref(r))
+                if r.left > _FAR // 2 or r.top > _FAR // 2:
+                    user32.SetWindowPos(h, None, _FAR, _FAR, 0, 0, _SWP)
+            seen = seen or mine
             return True
 
         user32.EnumWindows(proc_t(each), 0)
-        return len(hidden)
     except Exception:
-        return 0
+        pass
+    return seen
 
 
 # ---------------------------------------------------------------- the page's server
@@ -141,7 +184,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Host") != f"127.0.0.1:{p.port}":         # no other names (DNS rebinding)
             return None
         url = urllib.parse.urlparse(self.path)
-        key = (urllib.parse.parse_qs(url.query).get("k") or [""])[0]
+        self.query = urllib.parse.parse_qs(url.query)
+        key = (self.query.get("k") or [""])[0]
         if not hmac.compare_digest(key, p.key):
             return None
         return url.path
@@ -172,6 +216,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return self._send(200 if token else 503, {"token": token})
         if path == "/ping":
             p.seen = time.time()
+            p.page_seen((self.query.get("vis") or [""])[0])
             return self._send(200, {"stop": not p.wanted, "name": NAME})
         return self._send(404, {"error": "unknown"})
 
@@ -259,7 +304,8 @@ def _devtools_call(ws_url, method, params, timeout=8.0):
 
 class Player:
     def __init__(self, app_dir, page, token_fn, on_change=None):
-        self.profile = os.path.join(app_dir, "player-browser")
+        self.app_dir = app_dir
+        self.profile = os.path.join(app_dir, "player-browser")     # set again at start: each browser has its own
         self.page = page
         self.token_fn = token_fn
         self.on_change = on_change or (lambda what: None)
@@ -273,21 +319,39 @@ class Player:
         self.status = "off"            # off, starting, ready, premium, error
         self.problem = ""
         self.device_id = None
+        self.past_ids = set()          # every device id this player has had (a restart gets a new one)
         self.seen = 0.0
         self.started = 0.0
         self.retries = []
         self.lock = threading.Lock()
         self.unlocked = False          # the page has had its "click" (browsers want one before audio plays)
         self.diag = {}
+        self.tucked = set()            # the browser windows already moved out of sight
+        self.vis = ""                  # what the page says: "visible" or "hidden" (a hidden page loads no sound)
+        self.hidden_since = None
+        self.said_hidden = False
 
     # ------------------------------------------------------------ what the app sees
     def info(self):
         return {"status": self.status, "problem": self.problem, "browser": self.browser or "", "ready": self.status == "ready",
-                "deviceId": self.device_id, "name": NAME, "unlocked": self.unlocked, "diag": self.diag}
+                "deviceId": self.device_id, "name": NAME, "unlocked": self.unlocked, "diag": self.diag, "page": self.vis}
+
+    def page_seen(self, vis):
+        """Each ping says whether the page counts as on screen."""
+        if vis not in ("visible", "hidden"):
+            return
+        if vis == "hidden":
+            self.hidden_since = self.hidden_since or time.time()
+        else:
+            if self.said_hidden:
+                print("[player: the player page is visible again, so its sound can load]")
+            self.hidden_since, self.said_hidden = None, False
+        self.vis = vis
 
     def no_sound(self, detail):
         """The sound check heard nothing while Spotify says this player is playing."""
-        print(f"[player: no sound from the built-in player ({detail}); checks: {self.diag}]")
+        print(f"[player: no sound from the built-in player ({detail}); page: {self.vis or '?'}; "
+              f"Spotify's frame: {self.media()}; checks: {self.diag}]")
         self._set("error", "Spotify says it's playing in the app, but no sound came out. Try again, or use the Spotify app.")
 
     def _set(self, status, problem=""):
@@ -308,6 +372,8 @@ class Player:
             if not path:
                 return self._set("error", "The built-in player needs Microsoft Edge or Google Chrome, and neither was found.")
             self.browser = name
+            # a profile per browser (Chrome can't open one Edge has used, and the other way round)
+            self.profile = os.path.join(self.app_dir, "player-chrome" if name == "Chrome" else "player-browser")
             self._serve()
             os.makedirs(self.profile, exist_ok=True)
             _seed_widevine(self.profile, name)
@@ -330,8 +396,18 @@ class Player:
             self.started = self.seen = time.time()
             self.device_id = None
             self.unlocked = False
+            self.tucked = set()
+            self.vis, self.hidden_since, self.said_hidden = "", None, False
             self._set("starting")
-            print(f"[player: starting the built-in player in a hidden {name} window]")
+            threading.Thread(target=self._tuck_early, args=(self.proc,), daemon=True).start()
+            print(f"[player: starting the built-in player in its own {name} window, kept off-screen]")
+
+    def _tuck_early(self, proc):
+        """While the browser opens, move its windows out of sight as soon as they appear."""
+        end = time.time() + 25
+        while time.time() < end and proc is self.proc and proc.poll() is None:
+            _tuck_windows(proc.pid, self.tucked)
+            time.sleep(0.08)
 
     def _serve(self):
         """The small server the player page talks to (127.0.0.1 only, random port, random key)."""
@@ -357,7 +433,7 @@ class Player:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as r:
             return json.loads(r.read())
 
-    def devtools(self, expression, gesture=True, frame=None):
+    def devtools(self, expression, gesture=True, frame=None, timeout=8.0):
         """Runs JavaScript in the player page (or, with frame=, in Spotify's frame inside it) as if you'd clicked there."""
         targets = self._targets()
         if frame:
@@ -367,29 +443,50 @@ class Player:
         if not target:
             raise RuntimeError(f"couldn't find the {'Spotify frame' if frame else 'player page'}")
         res = _devtools_call(target["webSocketDebuggerUrl"], "Runtime.evaluate",
-                             {"expression": expression, "userGesture": gesture, "awaitPromise": True, "returnByValue": True})
+                             {"expression": expression, "userGesture": gesture, "awaitPromise": True, "returnByValue": True},
+                             timeout=timeout)
         if res.get("exceptionDetails"):
             d = res["exceptionDetails"]
             raise RuntimeError(((d.get("exception") or {}).get("description") or d.get("text") or "script error").split("\n")[0])
         return (res.get("result") or {}).get("value")
 
+    def control(self, action, value=None):
+        """Play, pause, skip, seek or set the volume right in the player (no round trip through Spotify's servers).
+        Returns what the player says ("playing", "paused" or "ok"); raises if the player can't do it."""
+        if self.status != "ready":
+            raise RuntimeError("the built-in player isn't ready")
+        got = self.devtools(f"window.__ctl ? window.__ctl({json.dumps(action)}, {json.dumps(value)}) : 'not loaded'", timeout=7.0)
+        if got in ("not loaded", "no player", "unknown"):
+            raise RuntimeError(f"the player page can't do that ({got})")
+        return got
+
+    def media(self):
+        """How the sound itself is doing inside Spotify's frame, in a few words (for Activity)."""
+        try:
+            return self.devtools("(() => { const ms = [...document.querySelectorAll('audio,video')];"
+                                 " if (!ms.length) return 'no sound element yet';"
+                                 " return ms.map(m => (m.readyState === 0 && !m.paused ? 'waiting to load' : m.paused ? 'paused' : 'playing')"
+                                 " + ` at ${m.currentTime.toFixed(1)}s` + (m.muted ? ', muted' : '') + (m.error ? `, error ${m.error.code}` : '')).join('; '); })()",
+                                 frame="scdn.co")
+        except Exception as e:
+            return f"not reachable ({e})"
+
     def unlock(self, why):
         """Give the page its click, nudge playback (pause and resume), and click inside Spotify's own frame too."""
+        if self.proc is not None:
+            _tuck_windows(self.proc.pid, self.tucked)        # makes sure the page is "on screen" (if hidden, no sound loads)
         try:
             got = self.devtools("window.__unlock ? window.__unlock() : 'the player is still loading'")
             self.unlocked = True
         except Exception as e:
             print(f"[player: couldn't unlock the sound ({why}): {e}]")
             return False
-        media = ""
         try:
-            media = self.devtools("(() => { const ms = [...document.querySelectorAll('audio,video')];"
-                                  " ms.forEach(m => { if (m.paused && m.readyState > 0) m.play().catch(() => {}); });"
-                                  " return ms.map(m => (m.paused ? 'paused' : 'playing') + (m.muted ? ', muted' : '')).join('; ') || 'no media yet'; })()",
-                                  frame="scdn.co")
-        except Exception as e:
-            media = f"not reachable ({e})"
-        print(f"[player: sound unlocked ({why}): {got}; Spotify's frame: {media}]")
+            self.devtools("[...document.querySelectorAll('audio,video')].forEach(m => { if (m.paused && m.readyState > 0) m.play().catch(() => {}); }); true",
+                          frame="scdn.co")
+        except Exception:
+            pass
+        print(f"[player: sound unlocked ({why}): {got}; page: {self.vis or '?'}; Spotify's frame: {self.media()}]")
         return True
 
     def stop(self):
@@ -439,10 +536,11 @@ class Player:
             proc = self.proc
             if not self.wanted or proc is None:
                 continue
-            if time.time() - self.started < 40 or self.status != "ready":
-                _hide_windows(proc.pid)               # keep it out of sight while it settles in
-            elif int(time.time()) % 10 == 0:
-                _hide_windows(proc.pid)
+            _tuck_windows(proc.pid, self.tucked)       # out of sight, never hidden (and shown again if something hid it)
+            if self.hidden_since and time.time() - self.hidden_since > 6 and not self.said_hidden:
+                self.said_hidden = True
+                print("[player: the browser says the player page is hidden, so it won't load any sound; "
+                      "showing its window again, off-screen]")
             if proc.poll() is not None:
                 self.restart("the browser closed")
             elif time.time() - self.seen > 25:
@@ -453,6 +551,7 @@ class Player:
         kind = e.get("type")
         if kind == "ready":
             self.device_id = e.get("device_id")
+            self.past_ids.add(self.device_id)
             self.retries = []
             print("[player: the built-in player is ready]")
             self._set("ready")
