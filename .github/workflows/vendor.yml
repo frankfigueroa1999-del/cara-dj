@@ -17,43 +17,82 @@ jobs:
         with:
           node-version: "22"
 
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.74
+
       - name: Install the libraries
         run: |
           mkdir -p /tmp/v && cd /tmp/v
           npm init -y > /dev/null
-          npm install butterchurn@3.0.0-beta.5 || npm install butterchurn@next
-          npm install milkdrop-preset-utils@0.2.1 hlslparser-js esbuild
+          npm install butterchurn@3.0.0-beta.5 milkdrop-preset-utils@0.2.1 esbuild
+
+      - name: Build the HLSL to GLSL converter (projectM's hlslparser, with a fix)
+        run: |
+          set -ex
+          git clone --depth 1 -b projectm-additions-by-deltaoscarmike https://github.com/jberg/hlslparser /tmp/hp
+          cd /tmp/hp
+          python3 - <<'PY'
+          p = 'src/HLSLParser.cpp'
+          s = open(p).read()
+          old = "    bool acceptBinaryOp = false;\n    while (1)\n    {\n        HLSLBinaryOp binaryOp;"
+          assert s.count(old) == 1, 'patch point not found'
+          s = s.replace(old, "    bool acceptBinaryOp = false;\n    HLSLBinaryOp binaryOp = HLSLBinaryOp_Add;\n    while (1)\n    {")
+          open(p, 'w').write(s)
+          PY
+          cat > wrapper.cpp <<'CPP'
+          #include <cstring>
+          #include <string>
+          #include "src/GLSLGenerator.h"
+          #include "src/HLSLParser.h"
+          #include "src/HLSLTree.h"
+          static std::string g_result;
+          extern "C" const char* parseHLSL(const char* source, const char* entryName, const char* type) {
+              using namespace M4;
+              Allocator allocator;
+              HLSLTree tree(&allocator);
+              HLSLParser parser(&allocator, &tree);
+              std::string pre;
+              if (!parser.ApplyPreprocessor("filename.hlsl", source, strlen(source), pre) ||
+                  !parser.Parse("filename.hlsl", pre.c_str(), pre.size())) { g_result = "parsing failed"; return g_result.c_str(); }
+              GLSLGenerator generator;
+              GLSLGenerator::Target target = strcmp(type, "vs") == 0 ? GLSLGenerator::Target_VertexShader : GLSLGenerator::Target_FragmentShader;
+              if (!generator.Generate(&tree, target, GLSLGenerator::Version_300_ES, entryName)) { g_result = "code generation failed"; return g_result.c_str(); }
+              g_result = generator.GetResult();
+              return g_result.c_str();
+          }
+          CPP
+          SRC=$(ls src/*.cpp | grep -v -i '/main.cpp$')
+          emcc -std=c++11 -O2 -w wrapper.cpp $SRC -o $GITHUB_WORKSPACE/hlslparser.js \
+            -s MODULARIZE=1 -s EXPORT_NAME=HLSLParserModule -s SINGLE_FILE=1 -s WASM=1 -s ALLOW_MEMORY_GROWTH=1 \
+            -s ENVIRONMENT=web,node -s EXPORTED_FUNCTIONS=_parseHLSL -s EXPORTED_RUNTIME_METHODS=cwrap
+          ls -la $GITHUB_WORKSPACE/hlslparser.js
 
       - name: Copy and bundle into ui/vendor
         run: |
-          set -x
+          set -ex
           V=$GITHUB_WORKSPACE/ui/vendor
-          mkdir -p $V
+          rm -rf $V && mkdir -p $V
+          mv $GITHUB_WORKSPACE/hlslparser.js $V/hlslparser.js
           cd /tmp/v
           cp node_modules/butterchurn/dist/butterchurn.min.js $V/butterchurn.min.js
-          cp node_modules/butterchurn/LICENSE $V/LICENSE-butterchurn.txt || true
-          cat > conv.js <<'JS'
-          import { splitPreset, prepareShader, processUnOptimizedShader } from "milkdrop-preset-utils";
-          import { convertHLSLShader } from "hlslparser-js";
-          export { splitPreset, prepareShader, processUnOptimizedShader, convertHLSLShader };
-          JS
-          npx esbuild conv.js --bundle --format=iife --global-name=MilkConvert --minify --platform=browser --outfile=$V/milk-convert.min.js --loader:.wasm=binary || echo "esbuild failed" > $V/esbuild-failed.txt
-          cp -r node_modules/hlslparser-js/dist $V/hlslparser-dist || true
+          sed -i '/^\/\/# sourceMappingURL/d' $V/butterchurn.min.js
+          cp node_modules/butterchurn/LICENSE $V/LICENSE-butterchurn.txt
+          cp node_modules/milkdrop-preset-utils/LICENSE $V/LICENSE-milkdrop-preset-utils.txt || true
+          curl -sSL https://raw.githubusercontent.com/jberg/hlslparser/master/LICENSE -o $V/LICENSE-hlslparser.txt || true
+          printf 'import { splitPreset, prepareShader, processUnOptimizedShader } from "milkdrop-preset-utils";\nexport { splitPreset, prepareShader, processUnOptimizedShader };\n' > utils.js
+          npx esbuild utils.js --bundle --format=iife --global-name=MilkUtils --minify --platform=browser --outfile=$V/milk-utils.min.js
           {
             echo "butterchurn: $(node -p "require('./node_modules/butterchurn/package.json').version")"
             echo "milkdrop-preset-utils: $(node -p "require('./node_modules/milkdrop-preset-utils/package.json').version")"
-            echo "hlslparser-js: $(node -p "require('./node_modules/hlslparser-js/package.json').version")"
-            echo "butterchurn dist-tags: $(npm view butterchurn dist-tags --json | tr -d '\n')"
-            echo "--- butterchurn/dist"; ls -la node_modules/butterchurn/dist
-            echo "--- hlslparser-js"; find node_modules/hlslparser-js -maxdepth 2 -type f | head -30
-            echo "--- hlslparser-js package.json"; cat node_modules/hlslparser-js/package.json
-          } > $V/VERSIONS.txt 2>&1
+            echo "hlslparser: jberg/hlslparser projectm-additions-by-deltaoscarmike + binaryOp fix, emscripten 3.1.74"
+          } > $V/VERSIONS.txt
           ls -la $V
 
       - name: Commit the files back to this branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ui/vendor
-          git commit -m "Visualizer libraries fetched from npm" || echo "nothing to commit"
+          git add -A ui/vendor
+          git commit -m "Visualizer libraries: Butterchurn, preset utils, fixed HLSL converter" || echo "nothing to commit"
           git push
