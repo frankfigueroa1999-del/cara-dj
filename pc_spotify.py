@@ -4,6 +4,7 @@ shaped into small plain dicts the window can draw. Uses the same Spotify endpoin
 
 `sp` is the DJ engine's spotipy client; the app sets it once Spotify is connected.
 """
+import random
 import re
 import threading
 import time
@@ -209,6 +210,7 @@ def recently_played():
         t = track(r.get("track"))
         if t:
             t["playedFrom"] = (r.get("context") or {}).get("uri") or ""
+            t["playedAt"] = r.get("played_at") or ""
             out.append(t)
     return out
 
@@ -218,7 +220,7 @@ def _id_of(uri, kind):
     return parts[parts.index(kind) + 1] if kind in parts and parts.index(kind) + 1 < len(parts) else ""
 
 
-def shortcuts(recent, pls, artists_known, albums):
+def shortcuts(recent, pls, artists_known, albums, limit=8, fill=True):
     """The tiles at the top of Home: what you played lately (playlists, albums, artists, Liked Songs), newest first."""
     mine = {p["id"]: p for p in pls}
     known = {a["id"]: a for a in artists_known if a and a.get("id")}
@@ -257,8 +259,10 @@ def shortcuts(recent, pls, artists_known, albums):
                 out.append({"kind": "artist", "id": a["id"], "uri": a["uri"], "name": a["name"], "art": a.get("imageMid") or a.get("image") or ""})
         else:
             out.append({"kind": "album", "id": xid, "uri": "spotify:album:" + xid, "name": t.get("album") or "", "art": t.get("artMid") or t.get("art") or ""})
-        if len(out) >= 8:
+        if len(out) >= limit:
             break
+    if not fill:
+        return out
     for p in pls:                                          # not much played lately: your playlists fill in
         if len(out) >= 8:
             break
@@ -317,6 +321,7 @@ def home(force=False):
     value = {
         "me": out.get("me"),
         "shortcuts": shortcuts(out.get("recent") or [], pls["items"], (out.get("artists") or []) + fo["items"], al["items"]),
+        "_recent": out.get("recent") or [],
         "recentAlbums": recent_albums(out.get("recent") or []),
         "topTracks": out.get("top") or [],
         "topArtists": out.get("artists") or [],
@@ -904,3 +909,498 @@ def now_extras(t):
             _extras.clear()
         _extras[tid] = {"at": time.time(), "value": out}
     return out
+
+
+# ---------------------------------------------------------------- Home's sections beyond your library
+# Spotify keeps its own Daily Mixes, Discover Weekly, Release Radar and artist radios away from apps like this one,
+# so the app makes its own from your listening: mixes from your top artists (grouped by sound), new releases from
+# artists you follow and play, stations, and "more like" rows. A mix's songs are gathered when you open or play it.
+# Since February 2026 Spotify no longer tells apps an artist's genres, so the genres (and who sounds like whom) come
+# from Wikidata, matched by Spotify artist ID.
+HUES = [0.52, 0.14, 0.99, 0.80, 0.33, 0.62, 0.07, 0.90, 0.45, 0.72, 0.25, 0.58]
+GENERIC = {"pop", "rock", "rap", "hip", "hop", "music", "indie", "alternative", "modern", "classic", "new", "art", "dance", "contemporary"}
+BROAD = ("pop music", "rock music", "hip hop music", "electronic music", "rhythm and blues", "jazz", "folk music",
+         "country music", "soul music", "alternative rock", "pop rock", "classical music", "dance music", "singing",
+         "contemporary music", "popular music", "world music", "instrumental music", "song", "vocal music")
+GENRE_NAMES = {"electronic dance music": "edm", "rhythm and blues": "r&b", "contemporary r&b": "contemporary r&b",
+               "hip hop music": "hip hop", "pop music": "pop", "rock music": "rock"}
+DAY_PARTS = (("night", 0, 5), ("morning", 5, 12), ("afternoon", 12, 17), ("evening", 17, 21), ("night", 21, 24))
+_feed = {"at": 0, "value": None}
+_mixdefs = {}
+_mixes = {}
+_genre_cache = {}          # Spotify artist id -> genres (Wikidata's, when Spotify sends none)
+_wd_rest = {"until": 0}    # Wikidata didn't answer: leave it be for a while rather than wait on it every time
+_alike_cache = {}          # Spotify artist id -> [{"id", "name"}] artists who share their sound (Wikidata)
+
+
+def _norm(s):
+    import unicodedata
+    s = unicodedata.normalize("NFKD", s or "")
+    return re.sub(r"[^a-z0-9]+", " ", "".join(c for c in s if not unicodedata.combining(c)).lower()).strip()
+
+
+def _gtitle(g):
+    return " ".join({"Edm": "EDM", "Uk": "UK", "Us": "US", "Dj": "DJ", "Lgbtq+": "LGBTQ+"}.get(w, w) for w in g.title().split())
+
+
+def _words(genres):
+    return {w for g in genres for w in g.replace("-", " ").split() if w not in GENERIC}
+
+
+def _genre_name(label):
+    g = re.sub(r"\s+", " ", (label or "").strip().lower())
+    if g in GENRE_NAMES:
+        return GENRE_NAMES[g]
+    return g[:-6] if g.endswith(" music") and len(g) > 10 else g
+
+
+def _fill_genres(arts):
+    """Gives each artist its genres: Spotify's when it sends them, otherwise Wikidata's (one question for everyone)."""
+    need = [a for a in arts if a and not a.get("genres")]
+    for a in need:
+        if a["id"] in _genre_cache:
+            a["genres"] = list(_genre_cache[a["id"]])
+    ask = [a for a in need if a["id"] not in _genre_cache and re.fullmatch(r"[A-Za-z0-9]{22}", a["id"])][:80]
+    if not ask or time.time() < _wd_rest["until"]:
+        return
+    ids = " ".join(_lit(a["id"]) for a in ask)
+    try:
+        rows = _wd(f'SELECT ?sid ?gl WHERE {{ VALUES ?sid {{ {ids} }} ?a wdt:P1902 ?sid; wdt:P136 ?g. '
+                   f'?g rdfs:label ?gl. FILTER(LANG(?gl) = "en") }}')
+    except Exception as e:
+        print(f"Wikidata didn't answer about genres: {str(e)[:120]}")
+        _wd_rest["until"] = time.time() + 600
+        return
+    found = {}
+    for b in rows:
+        g = _genre_name(_wv(b, "gl"))
+        lst = found.setdefault(_wv(b, "sid"), [])
+        if g and g not in lst:
+            lst.append(g)
+    for a in ask:
+        # the most specific genres first ("dance-pop" says more than "pop")
+        gs = sorted(found.get(a["id"]) or [], key=lambda g: (g in {"pop", "rock", "hip hop", "r&b", "electronic"}, -len(g)))[:8]
+        _genre_cache[a["id"]] = gs
+        a["genres"] = list(gs)
+
+
+def _alike(aid):
+    """Artists who share this one's sound (several of the same genres on Wikidata), the best known first."""
+    if aid in _alike_cache:
+        return _alike_cache[aid]
+    if not re.fullmatch(r"[A-Za-z0-9]{22}", aid or "") or time.time() < _wd_rest["until"]:
+        return []
+    broad = ", ".join(_lit(x) for x in BROAD)
+    q = f'''SELECT ?sid (SAMPLE(?nm) AS ?name) (COUNT(DISTINCT ?g) AS ?shared) (MAX(?links) AS ?fame) WHERE {{
+      ?seed wdt:P1902 {_lit(aid)}; wdt:P136 ?g.
+      ?g rdfs:label ?gl. FILTER(LANG(?gl) = "en" && !(STR(?gl) IN ({broad})))
+      ?o wdt:P136 ?g; wdt:P1902 ?sid; wikibase:sitelinks ?links.
+      FILTER(?o != ?seed && ?links >= 12)
+      OPTIONAL {{ ?o rdfs:label ?nm. FILTER(LANG(?nm) = "en") }}
+    }} GROUP BY ?sid ORDER BY DESC(?shared) DESC(?fame) LIMIT 24'''
+    try:
+        rows = _wd(q)
+    except Exception as e:
+        print(f"Wikidata didn't answer about similar artists: {str(e)[:120]}")
+        _wd_rest["until"] = time.time() + 600
+        return []
+    out, seen = [], set()
+    for b in rows:
+        sid, nm = _wv(b, "sid"), _wv(b, "name")
+        if sid and nm and sid != aid and nm.lower() not in seen and re.fullmatch(r"[A-Za-z0-9]{22}", sid):
+            seen.add(nm.lower())
+            out.append({"id": sid, "name": nm})
+    if len(_alike_cache) > 200:
+        _alike_cache.clear()
+    _alike_cache[aid] = out
+    return out
+
+
+def _groups(arts, n=6, size=4):
+    """Your top artists in groups that sound alike (by genre), the best-loved first."""
+    left, out = list(arts), []
+    while left and len(out) < n:
+        seed = left.pop(0)
+        g, w = set(seed["genres"]), _words(seed["genres"])
+        group = [seed]
+        for a in sorted(left, key=lambda a: -(2 * len(g & set(a["genres"])) + len(w & _words(a["genres"])))):
+            if len(group) >= size:
+                break
+            if (g & set(a["genres"])) or (w & _words(a["genres"])) or not g:
+                group.append(a)
+        if len(group) == 1 and left:                  # nothing alike: the next favourite keeps it company
+            group.append(left[0])
+        for a in group[1:]:
+            if a in left:
+                left.remove(a)
+        out.append(group)
+    return out
+
+
+def _pic(a):
+    return (a.get("imageMid") or a.get("image") or "") if a else ""
+
+
+def _mixdef(mid, kind, name, seeds, hue, genre="", label="", num="", **extra):
+    m = {"id": mid, "kind": kind, "name": name, "seeds": [{"id": a.get("id") or "", "name": a["name"]} for a in seeds],
+         "artists": [a["name"] for a in seeds], "image": next((_pic(a) for a in seeds if _pic(a)), ""),
+         "hue": hue, "genre": genre, "label": label, "num": num}
+    m.update(extra)
+    _mixdefs[mid] = m
+    return m
+
+
+def _day_part(hour):
+    return next(p for p, a, b in DAY_PARTS if a <= hour < b)
+
+
+def _local_hour(stamp):
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone().hour
+    except Exception:
+        return None
+
+
+def _who_played(recent, known, part=None):
+    """The artists in what you played lately (only at this time of day, if `part`), the most played first."""
+    count, names = {}, {}
+    for t in recent:
+        if part:
+            h = _local_hour(t.get("playedAt") or "")
+            if h is None or _day_part(h) != part:
+                continue
+        for a in (t.get("artists") or [])[:1]:
+            if a.get("id"):
+                count[a["id"]] = count.get(a["id"], 0) + 1
+                names[a["id"]] = a.get("name") or ""
+    order = sorted(count, key=lambda k: -count[k])
+    return [known.get(k) or {"id": k, "name": names[k], "genres": []} for k in order]
+
+
+def _artist_albums(aid, group, limit):
+    r = safe(lambda: get(f"artists/{aid}/albums", include_groups=group, limit=limit)) or {}
+    return [x for x in (album(i) for i in r.get("items") or []) if x]
+
+
+def _parallel(jobs, timeout=20):
+    """Runs (key, fn) jobs side by side; gives {key: result}."""
+    out = {}
+
+    def run(k, fn):
+        out[k] = fn()
+
+    threads = [threading.Thread(target=run, args=j, daemon=True) for j in jobs]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout)
+    return out
+
+
+def home_feed(force=False):
+    """Home's sections: Made For (Daily Mixes, Discover Weekly, Release Radar), a mix for this time of day, Recents,
+    New releases for you, Your top mixes, More like..., Recommended Stations and the big "made for you" cards."""
+    with _lock:
+        if not force and _feed["value"] and time.time() - _feed["at"] < 1800:
+            return _feed["value"]
+    h = home()
+    j = safe(lambda: get("me/top/artists", limit=40, time_range="medium_term")) or {}
+    arts = [a for a in (artist(x) for x in j.get("items") or []) if a]
+    if len(arts) < 6:                                   # not much listening yet: lean on recent favourites
+        j = safe(lambda: get("me/top/artists", limit=40, time_range="short_term")) or {}
+        arts += [a for a in (artist(x) for x in j.get("items") or []) if a and a["id"] not in {b["id"] for b in arts}]
+    followed = h.get("artists") or []
+    if not arts:                                        # no top artists at all: the ones you follow stand in
+        arts = list(followed[:20])
+    _fill_genres(arts + followed)
+    known = {a["id"]: a for a in followed + arts}
+    recent = h.get("_recent") or []
+
+    daily = [_mixdef(f"daily{i + 1}", "daily", f"Daily Mix {i + 1}", grp, HUES[i], label="Daily Mix", num=f"{i + 1:02d}")
+             for i, grp in enumerate(_groups(arts, 6, 4))]
+    made = list(daily)
+    if arts:
+        made.append(_mixdef("discover", "discover", "Discover Weekly", arts[:6], 0.74, label="Discover Weekly"))
+
+    # your top genres, weighted by how much you play each artist
+    weight = {}
+    for r, a in enumerate(arts):
+        for g in a["genres"]:
+            weight[g] = weight.get(g, 0) + 1 / (1 + r * 0.15)
+    tops = []
+    for g in sorted(weight, key=lambda k: -weight[k]):
+        if any(_words([g]) and _words([g]) <= _words([t]) for t in tops):
+            continue                                    # "uk metalcore" adds nothing after "metalcore"
+        tops.append(g)
+        if len(tops) >= 10:
+            break
+    top_mixes = []
+    for i, g in enumerate(tops):
+        members = [a for a in arts if g in a["genres"]][:5]
+        if members:
+            top_mixes.append(_mixdef("genre:" + g, "genre", f"{_gtitle(g)} Mix", members, HUES[(i + 3) % len(HUES)], genre=g, label=f"{_gtitle(g)} Mix"))
+    if len(top_mixes) < 4:                              # few genres known: a mix per favourite artist fills in
+        for i, a in enumerate(arts[:8]):
+            if len(top_mixes) >= 8:
+                break
+            top_mixes.append(_mixdef("artist:" + a["id"], "artist", f"{a['name']} Mix", [a] + [b for b in arts if b is not a][:2],
+                                     HUES[(i + 5) % len(HUES)], label=f"{a['name']} Mix"))
+
+    stations = []
+    for i, a in enumerate(arts[:12]):
+        friends = [b for b in arts if b is not a and set(b["genres"]) & set(a["genres"])][:3]
+        stations.append(_mixdef("station:" + a["id"], "station", f"{a['name']} Radio", [a], HUES[(i * 5) % len(HUES)], label="Radio",
+                                **{"with": [b["name"] for b in friends], "withArt": [_pic(b) for b in friends if _pic(b)][:2],
+                                   "artist": {"id": a["id"], "name": a["name"], "image": _pic(a)}}))
+
+    # a mix for this time of day, from the artists you play around now
+    hour = time.localtime().tm_hour
+    part = _day_part(hour)
+    day = time.strftime("%A")
+    then = _who_played(recent, known, part)
+    lately = _who_played(recent, known)
+    timed = []
+    if len(then) >= 2 or lately:
+        seeds = (then if len(then) >= 2 else lately)[:5]
+        timed.append(_mixdef("time", "time", f"{day} {part.title()}", seeds, 0.08 if part == "morning" else 0.6 if part == "night" else 0.95,
+                             label=f"{day} {part}", part=part, day=day))
+    timed.append(_mixdef("onrepeat", "onrepeat", "On Repeat", arts[:3], 0.92, label="On Repeat"))
+    timed.append(_mixdef("rewind", "rewind", "Repeat Rewind", arts[3:6] or arts[:3], 0.55, label="Repeat Rewind"))
+    if lately:
+        timed.append(_mixdef("recent", "recent", "Recently Played Mix", lately[:5], 0.3, label="Recent Mix"))
+    for m in top_mixes:                                 # and your top mixes that sound like right now
+        if len(timed) >= 6:
+            break
+        if {s["id"] for s in m["seeds"]} & {a["id"] for a in then}:
+            timed.append(m)
+
+    out = {"made": made, "timed": timed, "part": part, "day": day, "topMixes": top_mixes, "stations": stations,
+           "recents": shortcuts(recent, h.get("playlists") or [], arts + followed, h.get("albums") or [], 16, fill=False),
+           "newReleases": [], "moreLike": [], "big": []}
+
+    # new releases from artists you follow and play most (the last few months): their latest singles and albums
+    who = []
+    for a in followed[:7] + arts:
+        if a["id"] not in {b["id"] for b in who}:
+            who.append(a)
+        if len(who) >= 14:
+            break
+    jobs = [((a["id"], "single"), (lambda a=a: _artist_albums(a["id"], "single", 3))) for a in who]
+    jobs += [((a["id"], "album"), (lambda a=a: _artist_albums(a["id"], "album", 4))) for a in who]
+    likes = [a for a in arts[:2]]
+    got = _parallel(jobs + [(("alike", a["id"]), (lambda a=a: _alike(a["id"]))) for a in likes])
+    since = time.strftime("%Y-%m-%d", time.localtime(time.time() - 120 * 86400))
+    seen, fresh = set(), []
+    found = [x for k, v in got.items() if k[1] in ("single", "album") for x in (v or [])]
+    for x in sorted(found, key=lambda x: x["release"] or "", reverse=True):
+        k = (_bare(x["name"]).lower(), x["artistId"])
+        if x["release"] >= since and k not in seen:
+            seen.add(k)
+            fresh.append(x)
+    out["newReleases"] = fresh[:14]
+    if fresh:
+        made.append(_mixdef("radar", "radar", "Release Radar", [known[x["artistId"]] for x in fresh if x["artistId"] in known][:4] or arts[:3],
+                            0.2, label="Release Radar", albums=[x["id"] for x in fresh[:15]],
+                            albumInfo={x["id"]: x for x in fresh[:15]}))
+
+    # "More like ..." your two favourite artists: their station, their latest albums, and artists who sound alike
+    def more_like(a):
+        albums = (got.get((a["id"], "album")) or [])[:3]
+        mine = [b for b in arts if b is not a and set(b["genres"]) & set(a["genres"])][:4]
+        ids = {a["id"]} | {b["id"] for b in mine}
+        extra = [x for x in (got.get(("alike", a["id"])) or []) if x["id"] not in ids and x["id"] not in known][:5]
+        looked = _parallel([(x["id"], (lambda x=x: artist(safe(lambda: get(f"artists/{x['id']}"))))) for x in extra], 15)
+        alike = [looked[x["id"]] for x in extra if looked.get(x["id"])]
+        st = next((m for m in stations if m["id"] == "station:" + a["id"]), None)
+        return {"artist": {"id": a["id"], "name": a["name"], "image": _pic(a)}, "station": st, "albums": albums,
+                "artists": (alike[:2] + mine[:2] + alike[2:] + mine[2:])[:8]}
+
+    out["moreLike"] = [more_like(a) for a in likes]
+    # the big cards: made for you, for fans of one of your favourites, and from what you played lately
+    big = []
+    disc = _mixdefs.get("discover")
+    if disc and disc in made:
+        big.append({"caption": "Made for you", "mix": disc})
+    fan = stations[2] if len(stations) > 2 else stations[0] if stations else None
+    if fan:
+        big.append({"caption": f"For fans of {fan['artist']['name']}", "mix": fan})
+    if _mixdefs.get("recent") in timed:
+        big.append({"caption": "Based on your recent listening", "mix": _mixdefs["recent"]})
+    out["big"] = big
+    with _lock:
+        _feed.update(at=time.time(), value=out)
+    return out
+
+
+def forget_feed():
+    with _lock:
+        _feed.update(at=0, value=None)
+    _mixes.clear()
+
+
+def _top_tracks(span):
+    j = safe(lambda: get("me/top/tracks", limit=50, time_range=span)) or {}
+    return [t for t in (track(x) for x in j.get("items") or []) if t and not t["local"]]
+
+
+def _songs_by(name, offset=0):
+    j = safe(lambda: get("search", q=f'artist:"{name}"', type="track", limit=10, offset=offset)) or {}
+    # the search also finds songs that only mention the name: keep the artist's own
+    low = _norm(name)
+    return [t for t in (track(x) for x in (j.get("tracks") or {}).get("items") or [])
+            if t and not t["local"] and any(_norm(a["name"]) == low for a in t["artists"])]
+
+
+def _interleave(queues, cap=50, skip=None):
+    out, keys = [], set(skip or ())
+    while len(out) < cap and any(queues):
+        for q in queues:
+            while q:
+                t = q.pop(0)
+                k = (_bare(t["title"]) + "|" + t["artist"]).lower()
+                if t["uri"] in keys or k in keys:
+                    continue
+                keys.update((t["uri"], k))
+                out.append(t)
+                break
+            if len(out) >= cap:
+                break
+    return out
+
+
+def _known_songs(h):
+    keys = set()
+    for t in (h.get("topTracks") or []) + (h.get("liked") or []) + (h.get("_recent") or []):
+        keys.update((t["uri"], (_bare(t["title"]) + "|" + t["artist"]).lower()))
+    return keys
+
+
+def _discover(m, h):
+    """New to you: songs by artists who sound like your favourites, but that you don't play yet."""
+    seeds = m["seeds"][:6]
+    mine = {a["id"] for a in (h.get("topArtists") or []) + (h.get("artists") or [])} | {s["id"] for s in seeds}
+    mine_names = {a["name"].lower() for a in (h.get("topArtists") or []) + (h.get("artists") or [])} | {s["name"].lower() for s in seeds}
+    got = _parallel([(s["id"], (lambda s=s: _alike(s["id"]))) for s in seeds])
+    pools = [[x for x in (got.get(s["id"]) or []) if x["id"] not in mine and x["name"].lower() not in mine_names] for s in seeds]
+    picks, names = [], set()
+    while len(picks) < 12 and any(pools):
+        for p in pools:
+            while p:
+                x = p.pop(0)
+                if x["name"].lower() not in names:
+                    names.add(x["name"].lower())
+                    picks.append(x["name"])
+                    break
+    if len(picks) < 6:                                   # Wikidata had little to say: your less-played favourites
+        for a in (h.get("topArtists") or [])[8:]:
+            if a["name"].lower() not in names and len(picks) < 10:
+                names.add(a["name"].lower())
+                picks.append(a["name"])
+    found = _parallel([(n, (lambda n=n: _songs_by(n)[:4])) for n in picks])
+    known = _known_songs(h)
+    queues = [[t for t in (found.get(n) or []) if t["uri"] not in known][:3] for n in picks]
+    out = _interleave(queues, 36, known)
+    random.shuffle(out)
+    return out
+
+
+def _radar(m):
+    """The newest songs from the artists you follow and play: a song or two from each new release."""
+    info = m.get("albumInfo") or {}
+
+    def songs(aid):
+        al = info.get(aid) or {}
+        r = safe(lambda: get(f"albums/{aid}/tracks", limit=3 if al.get("type") != "Album" else 2)) or {}
+        return [t for t in (track(x, album=al) for x in r.get("items") or []) if t and not t["local"]] if al else []
+
+    got = _parallel([(aid, (lambda aid=aid: songs(aid))) for aid in m.get("albums") or []])
+    queues = [list(got.get(aid) or []) for aid in m.get("albums") or []]
+    out = []
+    for q in queues:                                     # newest release first, then a second song from each
+        out += q[:1]
+    for q in queues:
+        out += q[1:3]
+    return _interleave([out], 40)
+
+
+def _artist_mix(m, h):
+    """A mix's songs: the artists' own, the ones you already play first, then their others (and their genre's)."""
+    ids = {s["id"] for s in m["seeds"]}
+    mine = [t for t in (h.get("topTracks") or []) + (h.get("liked") or []) if ids & {a["id"] for a in t["artists"]}]
+    jobs = [(f"a{i}", (lambda s=s: _songs_by(s["name"]))) for i, s in enumerate(m["seeds"][:5])]
+    if m["kind"] == "station" and m["seeds"]:
+        lead = m["seeds"][0]
+        friends = list(m.get("with") or [])
+        if len(friends) < 4:
+            friends += [x["name"] for x in _alike(lead["id"]) if x["name"] not in friends][:4 - len(friends)]
+        jobs.append(("a0b", lambda: _songs_by(lead["name"], 10)))
+        jobs += [(f"w{i}", (lambda nm=nm: _songs_by(nm))) for i, nm in enumerate(friends[:4])]
+    if m.get("genre"):
+        g = m["genre"]
+        jobs += [("g0", lambda: [t for t in (track(x) for x in ((safe(lambda: get("search", q=f'genre:"{g}"', type="track", limit=10)) or {}).get("tracks") or {}).get("items") or []) if t and not t["local"]])]
+    got = _parallel(jobs)
+    queues = [list(mine)] + [list(got.get(k) or []) for k, _ in jobs]
+    if m["kind"] == "station":                           # the lead artist comes round every other song
+        lead_q = (got.get("a0") or []) + (got.get("a0b") or [])
+        others = [list(got.get(k) or []) for k, _ in jobs if k not in ("a0", "a0b")]
+        out = _interleave([list(mine)[:4], lead_q] + others, 50)
+        return out
+    out = _interleave(queues, 50)
+    head, rest = out[:1], out[1:]
+    random.shuffle(rest)                                 # a mix, not a discography
+    return head + rest
+
+
+def mix(mid):
+    """A mix's songs, gathered now (kept for half an hour)."""
+    hit = _mixes.get(mid)
+    if hit and time.time() - hit["at"] < 1800:
+        return hit["value"]
+    m = _mixdefs.get(mid)
+    if not m:
+        home_feed()
+        m = _mixdefs.get(mid)
+    if not m:
+        return None
+    h = home()
+    kind = m["kind"]
+    if kind == "onrepeat":
+        tracks = _top_tracks("short_term") or list(h.get("topTracks") or [])
+    elif kind == "rewind":
+        now_ = {t["uri"] for t in _top_tracks("short_term")}
+        tracks = [t for t in _top_tracks("long_term") if t["uri"] not in now_] or _top_tracks("medium_term")
+    elif kind == "radar":
+        tracks = _radar(m)
+    elif kind == "discover":
+        tracks = _discover(m, h)
+    else:
+        tracks = _artist_mix(m, h)
+    value = dict(m, tracks=tracks[:50], description=_mix_line(m))
+    value.pop("albumInfo", None)
+    if tracks:
+        if len(_mixes) > 40:
+            _mixes.clear()
+        _mixes[mid] = {"at": time.time(), "value": value}
+    return value
+
+
+def _mix_line(m):
+    names = m["artists"][:3]
+    kind = m["kind"]
+    if kind == "station":
+        w = m.get("with") or []
+        return f"With {', '.join(w)} and more" if w else f"Songs by {names[0]} and artists like them"
+    if kind == "discover":
+        return "Songs from artists who sound like your favourites, picked by this app from your listening."
+    if kind == "radar":
+        return "The newest songs from artists you follow and play."
+    if kind == "onrepeat":
+        return "The songs you can't stop playing lately."
+    if kind == "rewind":
+        return "Songs you loved a while back and haven't played lately."
+    if kind == "time":
+        return f"Your {m.get('part', 'day')} sound: " + (", ".join(names) + " and more" if names else "the artists you play around now")
+    if kind == "recent":
+        return "From what you played lately: " + ", ".join(names) + " and more"
+    return (", ".join(names) + " and more") if names else ""

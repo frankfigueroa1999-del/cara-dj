@@ -34,7 +34,7 @@
 <main id="shell">
   <aside id="library" class="pane lg">
     <div class="lib-head">
-      <button class="lib-title" data-act="lib-collapse" title="Collapse Your Library"><i data-icon="library" data-size="24"></i><span>Your Library</span></button>
+      <button class="lib-title" id="lib-toggle" data-act="lib-collapse" title="Collapse Your Library"><span class="pane-ic when-open"><i data-icon="libClose" data-size="22"></i></span><span class="pane-ic when-mini"><i data-icon="libOpen" data-size="22"></i></span><span class="lib-word">Your Library</span></button>
       <button class="lib-create" data-act="new-playlist" title="Create a playlist"><i data-icon="plus" data-size="18"></i><span>Create</span></button>
     </div>
     <div class="lib-chips" id="lib-chips"></div>
@@ -53,11 +53,16 @@
   <div class="drag" id="drag-r" title="Drag to resize"></div>
   <aside id="nowview" class="pane lg">
     <header class="nv-head">
+      <button class="icon-btn nv-toggle" data-act="nv-collapse" title="Hide Now Playing view"><i data-icon="nvClose" data-size="22"></i></button>
       <b class="ell" id="nv-ctx">Now playing</b>
       <button class="icon-btn" id="nv-more" title="More options"><i data-icon="more" data-size="20"></i></button>
-      <button class="icon-btn" id="nv-close" title="Close"><i data-icon="close" data-size="20"></i></button>
+      <button class="icon-btn" id="nv-full" title="Full screen"><i data-icon="fullscreen" data-size="20"></i></button>
     </header>
     <div class="nv-body scroll" id="nv-body"></div>
+    <div class="nv-rail" id="nv-rail">
+      <button class="icon-btn" data-act="nv-expand" title="Show Now Playing view"><i data-icon="nvOpen" data-size="22"></i></button>
+      <button class="nv-rail-art" id="nv-rail-art" data-act="nv-expand" title="Show Now Playing view"></button>
+    </div>
   </aside>
 </main>
 
@@ -82,7 +87,6 @@
     </div>
   </div>
   <div class="side">
-    <button class="icon-btn" id="bar-nv" title="Now Playing view"><i data-icon="panel" data-size="19"></i></button>
     <button class="icon-btn" id="bar-lyrics" title="Lyrics"><i data-icon="lyricsmic" data-size="19"></i></button>
     <button class="icon-btn" id="bar-queue" title="Queue"><i data-icon="queue" data-size="20"></i></button>
     <button class="icon-btn" id="bar-dev" title="Connect to a device"><i data-icon="speaker" data-size="20"></i></button>

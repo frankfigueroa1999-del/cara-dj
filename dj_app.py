@@ -89,6 +89,7 @@ DEFAULTS = {
     "recent_searches": [],
     "player_rechecked": False,  # set once: the built-in player got another go after its silent-window fix
     "player": "app",            # where music plays: "app" (the built-in player) or "spotify" (the Spotify app, any device)
+    "ui_bg": "song",            # the window's background: "song" (its colours), "black" or "white" (the window keeps its own copy)
 }
 TRANSITION_WEIGHTS = {"talkover": 4, "intro": 3, "silent": 3, "fadeout": 2}
 SECRET_KEYS = ("spotify_client_secret", "elevenlabs_api_key", "gemini_api_key")
@@ -412,6 +413,7 @@ class App:
         self.connected = False
         self.now = None
         pc_spotify.forget_home()
+        pc_spotify.forget_feed()
         pc_spotify._me.update(at=0, value=None)
         print("Logged out of Spotify.")
 
@@ -1106,6 +1108,17 @@ class Api:
         return pc_spotify.home(bool(force))
 
     @guard
+    def home_feed(self, force=False):
+        """Home's sections beyond your library: Daily Mixes, top mixes, stations, new releases, More like..."""
+        if not self._app.connected:
+            return None
+        return pc_spotify.home_feed(bool(force))
+
+    @guard
+    def mix(self, mid):
+        return pc_spotify.mix(str(mid or ""))
+
+    @guard
     def more(self, kind, offset=0, after=None):
         if kind == "playlists":
             return pc_spotify.my_playlists(int(offset))
@@ -1274,6 +1287,12 @@ class Api:
         return True
 
     @guard
+    def titlebar(self, mode="song"):
+        """Preferences > Background: the title bar takes the window's own background (song colours, black or white)."""
+        set_titlebar(mode if mode in TITLE_COLOURS else "song")
+        return True
+
+    @guard
     def fullscreen(self):
         w = self._app.window
         if w is not None:
@@ -1282,22 +1301,38 @@ class Api:
 
 
 # ---------------------------------------------------------------- the window
-def dark_titlebar():
-    """Ask Windows for a dark title bar (best effort; ignored elsewhere)."""
+TITLEBAR = {"mode": "song"}
+TITLE_COLOURS = {"song": 0x0B080A, "black": 0x000000, "white": 0xEEEAE9}      # the window's background, as 0xBBGGRR
+
+
+def set_titlebar(mode=None):
+    """Ask Windows for a title bar that matches the window's background (best effort; ignored elsewhere)."""
+    if mode is not None:
+        TITLEBAR["mode"] = mode
     if sys.platform != "win32":
         return
     try:
         import ctypes
         hwnd = ctypes.windll.user32.FindWindowW(None, APP_NAME)
-        value = ctypes.c_int(1)
-        for attr in (20, 19):                      # Windows 10 20H1+ and older builds
+        if not hwnd:
+            return
+        light = TITLEBAR["mode"] == "white"
+        value = ctypes.c_int(0 if light else 1)
+        for attr in (20, 19):                      # dark mode: Windows 10 20H1+ and older builds
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
         # Windows 11: the title bar takes the app's own background, so it reads as part of the window
-        for attr, rgb in ((35, 0x0B080A), (34, 0x0B080A)):    # caption and border colour (0xBBGGRR)
+        rgb = TITLE_COLOURS.get(TITLEBAR["mode"], 0x0B080A)
+        for attr in (35, 34):                      # caption and border colour
             color = ctypes.c_int(rgb)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(color), ctypes.sizeof(color))
+        text = ctypes.c_int(0x1A1A1A if light else 0xF2F2F2)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(text), ctypes.sizeof(text))
     except Exception:
         pass
+
+
+def dark_titlebar():
+    set_titlebar()
 
 
 def tell(message):
@@ -1401,9 +1436,11 @@ def main():
         return
     app = App()
     api = Api(app)
+    bg = app.cfg.get("ui_bg") if app.cfg.get("ui_bg") in TITLE_COLOURS else "song"
+    TITLEBAR["mode"] = bg
     window = webview.create_window(
-        APP_NAME, url=os.path.join(HERE, "ui", "index.html"), js_api=api,
-        width=1440, height=900, min_size=(1080, 680), background_color="#0A080B", text_select=False,
+        APP_NAME, url=os.path.join(HERE, "ui", "index.html"), js_api=api, width=1440, height=900, min_size=(1080, 680),
+        background_color={"white": "#E9EAEE", "black": "#000000"}.get(bg, "#0A080B"), text_select=False,
     )
     app.window = window
     window.events.closed += app.on_close
