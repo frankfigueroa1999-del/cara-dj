@@ -75,7 +75,6 @@ DEFAULTS = {
     "cohost_swears": True,
     "cohost_voice": "",
     "recent_searches": [],
-    "milkdrop_path": "",
 }
 TRANSITION_WEIGHTS = {"talkover": 4, "intro": 3, "silent": 3, "fadeout": 2}
 SECRET_KEYS = ("spotify_client_secret", "elevenlabs_api_key", "gemini_api_key")
@@ -181,48 +180,6 @@ def open_path(path):
             subprocess.Popen(["xdg-open", path])
     except Exception as e:
         print(f"Couldn't open {path}: {e}")
-
-
-def find_milkdrop(cfg):
-    """Your copy of MilkDrop 3: where you pointed us last time, the app's own folder, or your Downloads / Desktop."""
-    import glob
-    home = os.path.expanduser("~")
-    spots = [cfg.get("milkdrop_path") or "",
-             os.path.join(APP_DIR, "MilkDrop3", "MilkDrop3.exe"), os.path.join(APP_DIR, "MilkDrop3.exe")]
-    for folder in ("Downloads", "Desktop", "Documents", os.path.join("OneDrive", "Desktop")):
-        spots += sorted(glob.glob(os.path.join(home, folder, "MilkDrop3*.exe")))
-        spots += sorted(glob.glob(os.path.join(home, folder, "MilkDrop*", "MilkDrop3*.exe")))
-    return next((p for p in spots if p and os.path.isfile(p)), None)
-
-
-VZX_APP = 981590     # VZX Player on Steam (free): a 3D visualizer that listens to whatever is playing
-
-
-def steam_has_vzx():
-    """(Steam is installed, VZX Player is installed) by reading Steam's own files. Windows only."""
-    if sys.platform != "win32":
-        return False, False
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as k:
-            steam = winreg.QueryValueEx(k, "SteamPath")[0]
-    except Exception:
-        return False, False
-    libs = [os.path.join(steam, "steamapps")]
-    try:
-        with open(os.path.join(steam, "steamapps", "libraryfolders.vdf"), encoding="utf-8", errors="ignore") as f:
-            for m in re.finditer(r'"path"\s+"([^"]+)"', f.read()):
-                libs.append(os.path.join(m.group(1).replace("\\\\", "\\"), "steamapps"))
-    except Exception:
-        pass
-    have = any(os.path.isfile(os.path.join(lib, f"appmanifest_{VZX_APP}.acf")) for lib in libs)
-    return True, have
-
-
-def launch_milkdrop(path):
-    import subprocess
-    subprocess.Popen([path], cwd=os.path.dirname(path), close_fds=True)
-    print(f"[visualizer: opened MilkDrop 3 ({path})]")
 
 
 # ---------------------------------------------------------------- the engine and Spotify, without any window
@@ -863,45 +820,6 @@ class Api:
             w.toggle_fullscreen()
         return True
 
-    @guard
-    def milkdrop(self):
-        path = find_milkdrop(self._app.cfg)
-        if not path:
-            return {"found": False}
-        if path != self._app.cfg.get("milkdrop_path"):
-            self._app.cfg["milkdrop_path"] = path
-            save_config(self._app.cfg)
-        launch_milkdrop(path)
-        return {"found": True, "path": path}
-
-    @guard
-    def vzx(self):
-        """Opens VZX Player through Steam; if it isn't installed yet, Steam's (free) install page; no Steam: the store page."""
-        steam, have = steam_has_vzx()
-        if have:
-            webbrowser.open(f"steam://rungameid/{VZX_APP}")
-            return "launched"
-        if steam:
-            webbrowser.open(f"steam://install/{VZX_APP}")
-            return "installing"
-        webbrowser.open(f"https://store.steampowered.com/app/{VZX_APP}/VZX_Player/")
-        return "store"
-
-    @guard
-    def pick_milkdrop(self):
-        """Asks where MilkDrop3.exe is (once), remembers it and opens it."""
-        import webview
-        w = self._app.window
-        kind = getattr(getattr(webview, "FileDialog", None), "OPEN", None) or webview.OPEN_DIALOG
-        got = w.create_file_dialog(kind, allow_multiple=False, file_types=("MilkDrop 3 (*.exe)", "All files (*.*)"))
-        if not got:
-            return {"found": False, "cancelled": True}
-        path = got[0] if isinstance(got, (list, tuple)) else got
-        self._app.cfg["milkdrop_path"] = path
-        save_config(self._app.cfg)
-        launch_milkdrop(path)
-        return {"found": True, "path": path}
-
 
 # ---------------------------------------------------------------- the window
 def dark_titlebar():
@@ -946,6 +864,9 @@ def self_test(path):
         if len(bundled) < 6:
             raise RuntimeError(f"only {len(bundled)} stingers inside the app")
         import soundcard  # noqa: F401  (the visualizer listens to the speakers)
+        if sys.platform == "win32":
+            import clr  # noqa: F401  (pythonnet: the window's bridge to Windows)
+            from webview.platforms import winforms  # noqa: F401  (the Edge WebView2 window and its DLLs)
         for name in ("index.html", "style.css", "app.js", "icons.js", "vis.js"):
             if not os.path.exists(os.path.join(HERE, "ui", name)):
                 raise RuntimeError(f"the screen file ui/{name} is missing")

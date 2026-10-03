@@ -44,11 +44,12 @@ class Listener:
         self._peak = 0.05
         self._used = 0.0
         self._fed = 0
+        self._failed_at = 0.0
 
     # ------------------------------------------------------------ capture
     def start(self):
         self._used = time.time()
-        if self.running:
+        if self.running or time.time() - self._failed_at < 15:     # it just failed: try again in a while, not 30 times a second
             return
         self.running = True
         threading.Thread(target=self._run, daemon=True).start()
@@ -68,10 +69,19 @@ class Listener:
             speaker = sc.default_speaker()
             mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
             with mic.recorder(samplerate=RATE, channels=2, blocksize=1024) as rec:
+                if not self.live or self.error:
+                    print(f"[visualizer: listening to {speaker.name}]")
                 self.live, self.error = True, ""
-                print(f"[visualizer: listening to {speaker.name}]")
-                last = 0.0
+                last = checked = time.time()
                 while self.running and time.time() - self._used < 6:     # stops once nobody's watching
+                    if time.time() - checked > 3:                         # headphones plugged in? follow the new speakers
+                        checked = time.time()
+                        try:
+                            if sc.default_speaker().name != speaker.name:
+                                threading.Timer(0.2, self.start).start()
+                                break
+                        except Exception:
+                            pass
                     data = rec.record(numframes=None)
                     if data is not None and len(data):
                         self.push(data)
@@ -82,8 +92,10 @@ class Listener:
                     if data is None or not len(data):
                         time.sleep(0.008)
         except Exception as e:
+            self._failed_at = time.time()
+            if str(e) != self.error:
+                print(f"[visualizer: couldn't listen to the speakers ({e}), so it dreams along instead]")
             self.error = str(e)
-            print(f"[visualizer: couldn't listen to the speakers ({e}), so it dreams along instead]")
         finally:
             self.live = False
             self.running = False
