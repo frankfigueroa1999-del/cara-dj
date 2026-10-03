@@ -210,3 +210,33 @@ class Listener:
 
 
 LISTENER = Listener()
+
+
+# ---------------------------------------------------------------- the speakers' name, for the "Play on" list
+_out = {"name": "", "at": 0.0, "busy": False}
+
+
+def output_name():
+    """Windows' default playback device ("Headphones (Realtek(R) Audio)"), looked up in the background every few
+    seconds. "" until it's known (and away from Windows)."""
+    if sys.platform == "win32" and time.time() - _out["at"] > 8 and not _out["busy"]:
+        _out["busy"] = True
+        threading.Thread(target=_look_up_output, daemon=True).start()
+    return _out["name"]
+
+
+def _look_up_output():
+    try:
+        if "soundcard" in sys.modules:           # the same Windows audio (COM) setup rule as Listener._run
+            try:
+                import ctypes
+                ctypes.windll.ole32.CoInitializeEx(None, 0)
+            except Exception:
+                pass
+        import soundcard as sc
+        _out["name"] = str(sc.default_speaker().name)
+    except Exception:
+        pass
+    finally:
+        _out["at"] = time.time()
+        _out["busy"] = False

@@ -11,6 +11,7 @@ import getpass
 import importlib
 import json
 import os
+import random
 import re
 import socket
 import sys
@@ -86,6 +87,7 @@ DEFAULTS = {
     "cohost_swears": True,
     "cohost_voice": "",
     "recent_searches": [],
+    "player_rechecked": False,  # set once: the built-in player got another go after its silent-window fix
     "player": "app",            # where music plays: "app" (the built-in player) or "spotify" (the Spotify app, any device)
 }
 TRANSITION_WEIGHTS = {"talkover": 4, "intro": 3, "silent": 3, "fadeout": 2}
@@ -218,6 +220,17 @@ class App:
         self.sound_watch = None         # listening for the built-in player's sound after it starts playing
         self.sound_heard = False
         self.sound_repaired = False     # started the player over once already because it was silent
+        self.want_here = False          # "this PC" was picked in Play on: move the music here once the player's ready
+        self.pending = {}               # a button's effect, shown until Spotify catches up: key -> (value, until)
+        self.notice, self.notice_n = None, 0
+        if not self.cfg.get("player_rechecked"):
+            # Before, the built-in player's hidden window loaded no sound, so many switched to the Spotify app.
+            # That's fixed: it gets one more go (music isn't moved; it's ready in the Play on list).
+            self.cfg["player_rechecked"] = True
+            if self.cfg.get("player") == "spotify":
+                self.cfg["player"] = "app"
+            if os.path.exists(CONFIG_PATH):
+                save_config(self.cfg)
         threading.Thread(target=self.poll_loop, daemon=True).start()
         if self.cfg["spotify_client_id"] and self.cfg["spotify_client_secret"]:
             if not self.cfg.get("welcomed"):
@@ -388,7 +401,8 @@ class App:
         if status != "ready":
             self.sound_heard, self.sound_watch = False, None
         if status == "ready" and self.cfg.get("player", "app") == "app":
-            threading.Thread(target=self.use_builtin, daemon=True).start()
+            force, self.want_here = self.want_here, False          # picked in Play on: the music comes here
+            threading.Thread(target=self.use_builtin, args=(force,), daemon=True).start()
         self.poke.set()
 
     def leave_builtin(self):
@@ -438,6 +452,46 @@ class App:
                 threading.Thread(target=again, daemon=True).start()
             else:
                 threading.Thread(target=p.no_sound, args=(detail,), daemon=True).start()
+
+    def play_here(self):
+        """"Headphones · this PC" in Play on: the music moves to the built-in player (started first if need be)."""
+        if not self.connected:
+            return "Connect Spotify first."
+        b = self.builtin
+        if self.cfg.get("player", "app") != "app":
+            self.cfg["player"] = "app"
+            save_config(self.cfg)
+            print("[player: music plays in this app again]")
+        if b.status == "premium":
+            return b.problem or "Spotify only lets apps play music with Premium."
+        if b.status == "ready":
+            return "ok" if self.use_builtin(force=True) else "Spotify wouldn't move the music here. Try again."
+        self.want_here = True
+        threading.Thread(target=b.retry if b.status in ("error", "off") else b.start, daemon=True).start()
+        return "starting"
+
+    def say(self, text):
+        """A message for the screen (it pops up once)."""
+        print(f"[{text}]")
+        self.notice_n += 1
+        self.notice = {"id": self.notice_n, "text": text}
+
+    def _settle(self, pb):
+        """Spotify takes a moment to show a button's effect: keep showing it meanwhile, and say so if it never comes."""
+        if not pb or not self.pending:
+            return pb
+        now = time.time()
+        for key, (want, until) in list(self.pending.items()):
+            if pb.get(key) == want:
+                self.pending.pop(key, None)                  # Spotify caught up
+            elif now < until:
+                pb[key] = want                               # still on its way: show what you asked for
+            else:
+                self.pending.pop(key, None)
+                if key in ("shuffle", "repeat"):
+                    dev = (pb.get("device") or {}).get("name") or "That device"
+                    self.say(f"{dev} didn't change {key}. Some speakers don't let apps change it.")
+        return pb
 
     def use_builtin(self, force=False):
         """Point Spotify at the built-in player, unless music is already playing on another device (or when asked)."""
@@ -531,7 +585,7 @@ class App:
             self.check_sleep(pb)
             t = pb.get("track") if pb else None
             if not t:
-                self.now = pb or {}
+                self.now = self._settle(pb) or {}
                 if empty_since is None:
                     empty_since = time.time()
                 if time.time() - empty_since > 6:       # explain why, once per change
@@ -569,7 +623,7 @@ class App:
                     got = pc_spotify.contains([t["uri"]])
                     if got:
                         self.liked[t["uri"]] = bool(got[0])
-            self.now = pb
+            self.now = self._settle(pb)
 
     def check_sleep(self, pb):
         """The sleep timer: pauses Spotify (and Cara) when it's up."""
@@ -609,6 +663,7 @@ class App:
                 got = b.control(action, value)
                 if action == "toggle" and self.now and got in ("playing", "paused"):
                     self.now["playing"], self.now["stamp"] = got == "playing", int(time.time() * 1000)
+                    self.pending["playing"] = (got == "playing", time.time() + 3)
                     action = ""                         # already up to date
                 self._commanded(action, value, n)
                 return True
@@ -622,8 +677,8 @@ class App:
             "previous": lambda: pc_spotify.post("me/player/previous"),
             "seek": lambda: pc_spotify.put("me/player/seek", position_ms=int(value or 0)),
             "volume": lambda: pc_spotify.put("me/player/volume", volume_percent=int(max(0, min(100, value or 0)))),
-            "shuffle": lambda: pc_spotify.put("me/player/shuffle", state="true" if value else "false"),
-            "repeat": lambda: pc_spotify.put("me/player/repeat", state=value or "off"),
+            "shuffle": lambda: pc_spotify.put("me/player/shuffle", state="true" if value else "false", **q),
+            "repeat": lambda: pc_spotify.put("me/player/repeat", state=value or "off", **q),
         }.get(action)
         if not f:
             return "That button doesn't do anything yet."
@@ -648,6 +703,13 @@ class App:
 
     def _commanded(self, action, value, n):
         """Show a button's effect right away (Spotify's own answer follows a moment later)."""
+        soon = time.time()
+        if action == "toggle":
+            self.pending["playing"] = (not n.get("playing"), soon + 3)
+        elif action == "shuffle":
+            self.pending["shuffle"] = (bool(value), soon + 4)
+        elif action == "repeat":
+            self.pending["repeat"] = (value or "off", soon + 4)
         if self.now:
             if action == "toggle":
                 self.now["playing"] = not n.get("playing")
@@ -687,11 +749,40 @@ class App:
             body["offset"] = {"uri": offset_uri}
         elif position is not None:
             body["offset"] = {"position": int(position)}
+        mine = None
+        if shuffle and context and not offset_uri and position is None:
+            mine = self.shuffle_start(context)          # Spotify starts a playlist at the top even with shuffle on
+            if mine is not None:
+                body["offset"] = {"position": mine}
         if shuffle is not None:
             pc_spotify.safe(lambda: pc_spotify.put("me/player/shuffle", state="true" if shuffle else "false", device_id=dev))
+            self.pending["shuffle"] = (bool(shuffle), time.time() + 5)
         ok = pc_spotify.safe(lambda: pc_spotify.put("me/player/play", payload=body, device_id=dev) or True, False)
+        if not ok and mine is not None:                 # that song may not play here: from the top, shuffled
+            body.pop("offset", None)
+            ok = pc_spotify.safe(lambda: pc_spotify.put("me/player/play", payload=body, device_id=dev) or True, False)
+        if ok and shuffle is not None:                  # some speakers reset shuffle when a new playlist starts
+            threading.Timer(1.2, lambda: pc_spotify.safe(lambda: pc_spotify.put(
+                "me/player/shuffle", state="true" if shuffle else "false", device_id=dev))).start()
         threading.Timer(0.5, self.poke.set).start()
         return "ok" if ok else "Spotify wouldn't play that (it may not be available in your country)."
+
+    def shuffle_start(self, context):
+        """A random song to start a shuffled playlist, album or Liked Songs on (None if Spotify can't say how many)."""
+        parts = context.split(":")
+        try:
+            if "collection" in parts:
+                total = (pc_spotify.get("me/tracks", limit=1) or {}).get("total") or 0
+            elif "playlist" in parts:
+                pid = parts[parts.index("playlist") + 1]
+                total = ((pc_spotify.get(f"playlists/{pid}", fields="tracks.total") or {}).get("tracks") or {}).get("total") or 0
+            elif "album" in parts:
+                total = (pc_spotify.get(f"albums/{parts[parts.index('album') + 1]}") or {}).get("total_tracks") or 0
+            else:
+                return None
+        except Exception:
+            return None
+        return random.randrange(total) if total > 1 else None
 
     # ------------------------------------------------------------ what the window shows
     def status_line(self, running, speaking):
@@ -747,6 +838,8 @@ class App:
             },
             "sleep": {"at": int(self.sleep_at * 1000) if self.sleep_at else None, "endOfSong": self.sleep_end_of_song},
             "player": dict(self.builtin.info(), mode=self.cfg.get("player", "app")),
+            "output": pc_audio.output_name(),          # Windows' playback device: where this app's music and Cara go
+            "notice": self.notice,
             "logCount": count,
             "serverTime": int(time.time() * 1000),
         }
@@ -871,6 +964,10 @@ class Api:
     def player_retry(self):
         threading.Thread(target=self._app.builtin.retry, daemon=True).start()
         return True
+
+    @guard
+    def play_here(self):
+        return self._app.play_here()
 
     @guard
     def use_builtin(self):

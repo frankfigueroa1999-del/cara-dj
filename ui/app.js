@@ -807,15 +807,29 @@ function askName() {
 async function devicesMenu(x, y) {
   const list = await api.devices();
   const devs = Array.isArray(list) ? list : [];
-  const items = [{ head: 'Play on' }];
-  if (!devs.length) items.push({ label: 'No devices: open Spotify somewhere', icon: 'warning', run: () => api.open_spotify() });
-  const pl = (S.state && S.state.player) || {};
+  const st = S.state || {};
+  const pl = st.player || {};
+  const out = (st.output || '').split(' (')[0].trim() || 'Speakers';          // Windows' playback device ("Headphones")
+  const outIcon = /head|ear|bud|pod/i.test(out) ? 'headphones' : 'speaker';
+  const pc = ((S.boot && S.boot.pc) || '').toLowerCase();
   const mine = d => (pl.deviceId && d.id === pl.deviceId) || d.name === (pl.name || 'Non Stop Pop DJ');
-  devs.sort((a, b) => mine(b) - mine(a));
-  for (const d of devs) items.push({ label: (mine(d) ? 'This app (built-in player)' : d.name) + (d.active ? '  (playing)' : ''), icon: mine(d) ? 'headphones' : d.type === 'computer' ? 'computer' : d.type === 'smartphone' ? 'phone' : 'speaker', on: d.active, run: async () => { if (!d.restricted) { await api.transfer(d.id); toast(mine(d) ? 'Playing in this app' : `Playing on ${d.name}`, 'speaker'); } } });
-  if (pl.mode === 'app' && pl.ready && !devs.some(mine)) items.push({ label: 'This app (built-in player)', icon: 'headphones', run: async () => { await api.use_builtin(); toast('Playing in this app', 'speaker'); } });
-  if (pl.mode === 'app' && !pl.ready) items.push({ label: pl.status === 'starting' ? 'This app: starting…' : 'This app: not available', icon: 'headphones', run: () => settingsSheet() });
-  items.push('-', { label: "Cara's voice comes out of this PC", icon: 'mic', run: () => {} });
+  const playingHere = devs.some(d => mine(d) && d.active);
+  const items = [{ head: 'Play on' }];
+  // this PC, through the app's own player, is always there (it plays on whatever Windows plays sound on)
+  const why = playingHere ? '  (playing)' : pl.status === 'premium' ? '  (needs Premium)' : pl.mode === 'app' && pl.status === 'starting' ? '  (starting…)' : '';
+  items.push({ label: `${out} · this PC${why}`, icon: outIcon, on: playingHere, run: async () => {
+    if (playingHere) return;
+    const r = await api.play_here();
+    if (r === 'ok') toast(`Playing on ${out}`, outIcon);
+    else if (r === 'starting') toast(`Starting the player. The music moves to ${out} when it's ready.`, outIcon);
+    else toast((r && r.error) || (typeof r === 'string' && r) || "Couldn't play here.", 'warning');
+    poke();
+  } });
+  for (const d of devs.filter(d => !mine(d))) {
+    const onPc = pc && d.type === 'computer' && (d.name || '').toLowerCase() === pc;    // the Spotify app on this PC
+    items.push({ label: (onPc ? 'Spotify app on this PC' : d.name) + (d.active ? '  (playing)' : ''), icon: d.type === 'computer' ? 'computer' : d.type === 'smartphone' ? 'phone' : 'speaker', on: d.active, run: async () => { if (!d.restricted) { await api.transfer(d.id); toast(`Playing on ${onPc ? 'the Spotify app' : d.name}`, 'speaker'); poke(); } } });
+  }
+  items.push('-', { label: `Cara's voice: ${out}`, icon: 'mic', run: () => {} });
   showMenu(items, x, y);
 }
 function sleepMenu(x, y) {
@@ -879,7 +893,7 @@ function settingsSheet() {
 
 function playerNote(p) {
   p = p || {};
-  if (p.status === 'ready') return `Ready (it runs in a hidden ${p.browser || 'Edge'} window).`;
+  if (p.status === 'ready') return `Ready (it runs in an off-screen ${p.browser || 'Chrome'} window).`;
   if (p.status === 'starting') return p.problem || 'Starting…';
   if (p.status === 'premium' || p.status === 'error') return p.problem || '';
   return '';
@@ -1013,6 +1027,9 @@ async function pollOnce() {
   if (!s || s.error) return;
   const prevUri = nowUri();
   S.state = s;
+  const nid = s.notice ? s.notice.id : 0;             // something the app wants you to know, once
+  if (S.noticeId != null && nid !== S.noticeId && s.notice) toast(s.notice.text, 'warning');
+  S.noticeId = nid;
   if (s.connected !== lastConnected) {
     const was = lastConnected; lastConnected = s.connected;
     if (s.connected) { loadHome().then(() => { if (['home', 'library', 'liked'].includes(S.route.name)) { S.route.loaded = false; render(); } }); }
