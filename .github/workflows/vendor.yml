@@ -1,0 +1,59 @@
+name: Fetch visualizer libraries
+
+on:
+  push:
+    branches: [vendor-fetch]
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install the libraries
+        run: |
+          mkdir -p /tmp/v && cd /tmp/v
+          npm init -y > /dev/null
+          npm install butterchurn@3.0.0-beta.5 || npm install butterchurn@next
+          npm install milkdrop-preset-utils@0.2.1 hlslparser-js esbuild
+
+      - name: Copy and bundle into ui/vendor
+        run: |
+          set -x
+          V=$GITHUB_WORKSPACE/ui/vendor
+          mkdir -p $V
+          cd /tmp/v
+          cp node_modules/butterchurn/dist/butterchurn.min.js $V/butterchurn.min.js
+          cp node_modules/butterchurn/LICENSE $V/LICENSE-butterchurn.txt || true
+          cat > conv.js <<'JS'
+          import { splitPreset, prepareShader, processUnOptimizedShader } from "milkdrop-preset-utils";
+          import { convertHLSLShader } from "hlslparser-js";
+          export { splitPreset, prepareShader, processUnOptimizedShader, convertHLSLShader };
+          JS
+          npx esbuild conv.js --bundle --format=iife --global-name=MilkConvert --minify --platform=browser --outfile=$V/milk-convert.min.js --loader:.wasm=binary || echo "esbuild failed" > $V/esbuild-failed.txt
+          cp -r node_modules/hlslparser-js/dist $V/hlslparser-dist || true
+          {
+            echo "butterchurn: $(node -p "require('./node_modules/butterchurn/package.json').version")"
+            echo "milkdrop-preset-utils: $(node -p "require('./node_modules/milkdrop-preset-utils/package.json').version")"
+            echo "hlslparser-js: $(node -p "require('./node_modules/hlslparser-js/package.json').version")"
+            echo "butterchurn dist-tags: $(npm view butterchurn dist-tags --json | tr -d '\n')"
+            echo "--- butterchurn/dist"; ls -la node_modules/butterchurn/dist
+            echo "--- hlslparser-js"; find node_modules/hlslparser-js -maxdepth 2 -type f | head -30
+            echo "--- hlslparser-js package.json"; cat node_modules/hlslparser-js/package.json
+          } > $V/VERSIONS.txt 2>&1
+          ls -la $V
+
+      - name: Commit the files back to this branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ui/vendor
+          git commit -m "Visualizer libraries fetched from npm" || echo "nothing to commit"
+          git push
