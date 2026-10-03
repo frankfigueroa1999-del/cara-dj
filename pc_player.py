@@ -115,7 +115,64 @@ class _Rect(ctypes.Structure):
     _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
 
+def _alive(pid):
+    """True while a process is running."""
+    if not pid:
+        return False
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        h = k32.OpenProcess(0x1000, False, int(pid))                  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259                          # STILL_ACTIVE
+    except Exception:
+        return False
+
+
+def _end(pid):
+    """Ends a process (the last resort, after asking the browser to close)."""
+    try:
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        h = k32.OpenProcess(0x0001, False, int(pid))                  # PROCESS_TERMINATE
+        if h:
+            k32.TerminateProcess(h, 1)
+            k32.CloseHandle(h)
+    except Exception:
+        pass
+
+
 PAGE_TITLE = "Non Stop Pop DJ player"     # player.html's <title>: how the player's own window is recognised
+
+
+def _player_pids():
+    """The processes that own a window showing the player page (normally one: the player's browser)."""
+    pids = set()
+    try:
+        user32 = ctypes.windll.user32
+        proc_t = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+        def each(hwnd, _):
+            title = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(ctypes.c_void_p(hwnd), title, 256)
+            if PAGE_TITLE in title.value:
+                owner = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(owner))
+                pids.add(owner.value)
+            return True
+
+        user32.EnumWindows(proc_t(each), 0)
+    except Exception:
+        pass
+    return pids
 _FAR = -32000                            # off every screen
 _SWP = 0x0001 | 0x0004 | 0x0010          # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
 
@@ -139,11 +196,11 @@ def _tuck_windows(pid, tucked):
             h = ctypes.c_void_p(hwnd)
             owner = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(h, ctypes.byref(owner))
-            if owner.value != pid:
-                return True
             title = ctypes.create_unicode_buffer(256)
             user32.GetWindowTextW(h, title, 256)
             mine = PAGE_TITLE in title.value
+            if owner.value != pid and not mine:
+                return True
             visible = bool(user32.IsWindowVisible(h))
             if hwnd not in tucked:
                 if not visible:
@@ -215,6 +272,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                 print(f"[player: no Spotify token for the player ({e})]")
             return self._send(200 if token else 503, {"token": token})
         if path == "/ping":
+            if (self.query.get("n") or [""])[0] != str(p.launch):
+                return self._send(200, {"stop": True, "name": NAME})       # a page left over from an earlier start
             p.seen = time.time()
             p.page_seen((self.query.get("vis") or [""])[0])
             return self._send(200, {"stop": not p.wanted, "name": NAME, "skip": p.skip})
@@ -229,7 +288,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             body = {}
         if path == "/event":
-            self.player.event(body)
+            if (self.query.get("n") or [""])[0] == str(self.player.launch):
+                self.player.event(body)
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "unknown"})
 
@@ -332,6 +392,9 @@ class Player:
         self.said_hidden = False
         self.skip = []                 # songs to skip the moment they start (taken out of the queue in the app)
         self.on_skipped = None
+        self.launch = 0                # which start this is: a page from an earlier one is told to close itself
+        self.launches = []             # when the browser was started lately (a hard stop if it keeps happening)
+        self.pid = None                # the browser process that has the player page (not always the one started)
 
     # ------------------------------------------------------------ what the app sees
     def info(self):
@@ -373,17 +436,27 @@ class Player:
             name, path = find_browser()
             if not path:
                 return self._set("error", "The built-in player needs Microsoft Edge or Google Chrome, and neither was found.")
+            now = time.time()
+            self.launches = [t for t in self.launches if now - t < 600] + [now]
+            if len(self.launches) > 6:
+                self.wanted = False
+                return self._set("error", "The built-in player keeps closing on this PC. Music plays through the Spotify app for now.")
             self.browser = name
             # a profile per browser (Chrome can't open one Edge has used, and the other way round)
             self.profile = os.path.join(self.app_dir, "player-chrome" if name == "Chrome" else "player-browser")
             self._serve()
             os.makedirs(self.profile, exist_ok=True)
             _seed_widevine(self.profile, name)
+            # A browser still holding this profile (left from a crash, say) would take the new page into a window
+            # of its own and leave: close it first, so there's only ever one player.
+            if self._close_browser():
+                print("[player: closed a player browser that was still open from before]")
             try:
                 os.remove(os.path.join(self.profile, "DevToolsActivePort"))     # a stale one would point at nothing
             except OSError:
                 pass
-            args = [path, f"--user-data-dir={self.profile}", f"--app=http://127.0.0.1:{self.port}/player?k={self.key}",
+            self.launch += 1
+            args = [path, f"--user-data-dir={self.profile}", f"--app=http://127.0.0.1:{self.port}/player?k={self.key}&n={self.launch}",
                     "--window-size=420,280", "--window-position=-32000,-32000", "--no-first-run", "--no-default-browser-check",
                     "--disable-sync", "--no-service-autorun", "--disable-extensions", "--autoplay-policy=no-user-gesture-required",
                     "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
@@ -395,6 +468,7 @@ class Player:
             except Exception as e:
                 return self._set("error", f"Couldn't start {name} for the built-in player ({e}).")
             self.job = _tie_to_app(self.proc)
+            self.pid = self.proc.pid
             self.started = self.seen = time.time()
             self.device_id = None
             self.unlocked = False
@@ -407,8 +481,8 @@ class Player:
     def _tuck_early(self, proc):
         """While the browser opens, move its windows out of sight as soon as they appear."""
         end = time.time() + 25
-        while time.time() < end and proc is self.proc and proc.poll() is None:
-            _tuck_windows(proc.pid, self.tucked)
+        while time.time() < end and proc is self.proc:
+            _tuck_windows(self.pid or proc.pid, self.tucked)
             time.sleep(0.08)
 
     def _serve(self):
@@ -419,7 +493,54 @@ class Player:
             self.port = self.server.server_address[1]
             threading.Thread(target=self.server.serve_forever, daemon=True).start()
             threading.Thread(target=self._watch, daemon=True).start()
-        return f"http://127.0.0.1:{self.port}/player?k={self.key}"
+        return f"http://127.0.0.1:{self.port}/player?k={self.key}&n={self.launch}"
+
+    def _devtools_port(self):
+        """(port, browser path) from the profile's DevToolsActivePort file, or (None, None)."""
+        try:
+            with open(os.path.join(self.profile, "DevToolsActivePort"), encoding="utf-8") as f:
+                lines = f.read().split()
+            return int(lines[0]), (lines[1] if len(lines) > 1 else "")
+        except (OSError, ValueError, IndexError):
+            return None, None
+
+    def _close_browser(self, wait=5.0):
+        """Asks the browser that has the player's profile open to close (every window of it). True if one did."""
+        port, path = self._devtools_port()
+        if not port:
+            return False
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=2) as r:
+                ws = json.loads(r.read()).get("webSocketDebuggerUrl") or ""
+        except Exception:
+            return False                                 # nothing there: no browser has the profile open
+        if not ws or (path and not ws.endswith(path)):
+            return False                                 # something else is on that port now: not ours
+        try:
+            _devtools_call(ws, "Browser.close", {}, timeout=3.0)
+        except Exception:
+            pass                                         # it can go before it answers
+        end = time.time() + wait
+        while time.time() < end:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=0.5).close()
+                time.sleep(0.2)
+            except Exception:
+                return True
+        return False
+
+    def _shut(self, proc):
+        """Closes the player's browser: asks it nicely, then makes sure."""
+        pid, self.pid = self.pid, None
+        self._close_browser(wait=3.0)
+        for p in (proc,):
+            if p is not None and p.poll() is None:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+        if pid and (proc is None or pid != proc.pid) and _alive(pid):
+            _end(pid)
 
     def _targets(self):
         port = None
@@ -490,7 +611,7 @@ class Player:
     def unlock(self, why):
         """Give the page its click, nudge playback (pause and resume), and click inside Spotify's own frame too."""
         if self.proc is not None:
-            _tuck_windows(self.proc.pid, self.tucked)        # makes sure the page is "on screen" (if hidden, no sound loads)
+            _tuck_windows(self.pid or self.proc.pid, self.tucked)   # makes sure the page is "on screen" (if hidden, no sound loads)
         try:
             got = self.devtools("window.__unlock ? window.__unlock() : 'the player is still loading'")
             self.unlocked = True
@@ -511,23 +632,15 @@ class Player:
             proc, self.proc = self.proc, None
             self.device_id = None
             self._set("off")
-        if proc is not None and proc.poll() is None:
+        if proc is not None:
             time.sleep(0.6)                       # the page sees "stop" on its next ping and disconnects cleanly
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+            self._shut(proc)
 
     def retry(self):
         """Try again button: a fresh start (new page, new click), forgetting earlier failures."""
-        self.retries, self.problem, self.wanted = [], "", True
+        self.retries, self.launches, self.problem, self.wanted = [], [], "", True
         proc, self.proc = self.proc, None
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(5)
-            except Exception:
-                pass
+        self._shut(proc)
         self.start()
 
     def restart(self, why, wait=4.0):
@@ -539,28 +652,40 @@ class Player:
             return
         print(f"[player: restarting the built-in player ({why})]")
         proc, self.proc = self.proc, None
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+        self._shut(proc)
         threading.Timer(wait, lambda: self.wanted and self.start()).start()
 
     def _watch(self):
         while True:
             time.sleep(1.5)
-            proc = self.proc
-            if not self.wanted or proc is None:
-                continue
-            _tuck_windows(proc.pid, self.tucked)       # out of sight, never hidden (and shown again if something hid it)
-            if self.hidden_since and time.time() - self.hidden_since > 6 and not self.said_hidden:
-                self.said_hidden = True
-                print("[player: the browser says the player page is hidden, so it won't load any sound; "
-                      "showing its window again, off-screen]")
-            if proc.poll() is not None:
-                self.restart("the browser closed")
-            elif time.time() - self.seen > 25:
-                self.restart("the player page stopped answering")
+            try:
+                self._check()
+            except Exception as e:                 # the watch carries on whatever happens
+                print(f"[player: watch: {e}]")
+
+    def _check(self):
+        """Every second and a half: the player stays out of sight, and it's started again if it went away."""
+        proc = self.proc
+        if not self.wanted or proc is None:
+            return
+        pid = self.pid or proc.pid
+        _tuck_windows(pid, self.tucked)                # out of sight, never hidden (and shown again if something hid it)
+        if self.hidden_since and time.time() - self.hidden_since > 6 and not self.said_hidden:
+            self.said_hidden = True
+            print("[player: the browser says the player page is hidden, so it won't load any sound; "
+                  "showing its window again, off-screen]")
+        gone = proc.poll() is not None if pid == proc.pid else not _alive(pid)
+        if gone:
+            # Chrome and Edge sometimes hand the page to another copy of themselves (one finishing an update, say)
+            # and leave. If the page still checks in, keep that copy rather than start yet another.
+            other = next(iter(_player_pids() - {pid}), None)
+            if other and time.time() - self.seen < 10:
+                print("[player: the browser handed the player page to another copy of itself; keeping that one]")
+                self.pid = other
+                return
+            self.restart("the browser closed")
+        elif time.time() - self.seen > 25:
+            self.restart("the player page stopped answering")
 
     # ------------------------------------------------------------ what the page says
     def event(self, e):

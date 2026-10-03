@@ -1515,6 +1515,33 @@ def dark_titlebar():
     set_titlebar()
 
 
+_MUTEX = []
+
+
+def already_running():
+    """True when Non Stop Pop DJ is already open: its window comes to the front instead of a second copy starting
+    (two copies would each start a player and fight over it)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+        handle = k32.CreateMutexW(None, False, "Local\\NonStopPopDJ.one")
+        if ctypes.get_last_error() != 183:          # ERROR_ALREADY_EXISTS
+            _MUTEX.append(handle)                   # held for as long as this copy runs
+            return False
+        user32 = ctypes.windll.user32
+        hwnd = user32.FindWindowW(None, APP_NAME)
+        if hwnd:
+            user32.ShowWindow(hwnd, 9)              # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+        return True
+    except Exception:
+        return False
+
+
 def tell(message):
     """A plain message box, for when the window itself can't open."""
     try:
@@ -1608,6 +1635,8 @@ def main():
     sys.stdout = sys.stderr = LOG      # a windowed .exe has no console, so catch prints for Activity
     if os.environ.get("NSP_SELFTEST"):
         self_test(os.environ["NSP_SELFTEST"])
+        return
+    if already_running():
         return
     try:
         import webview
