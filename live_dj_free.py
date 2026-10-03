@@ -255,6 +255,7 @@ FORCE_BREAKING = threading.Event()  # set this to fire a breaking-news interrupt
 FORCE_POPIN = threading.Event()     # set this to fire a pop-in on the current song right now (test button)
 FORCE_STINGER = threading.Event()   # set this to fire a station tag right now (test button)
 FORCE_DUO = threading.Event()       # set this to hear Cara and Scratch right now (test button)
+STATUS = {"speaking": False, "songs_left": None}   # for the app: Cara on the air right now, and songs until her next break
 
 sp = spotipy.Spotify(
     auth_manager=SpotifyOAuth(
@@ -1398,13 +1399,17 @@ def pick_cached_stinger():
 
 
 def play_stinger_file(path):
-    pygame.mixer.music.load(path)
-    pygame.mixer.music.set_volume(max(0.0, min(1.0, STINGER_VOLUME)))
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.mixer.music.set_volume(max(0.0, min(1.0, STINGER_VOLUME)))   # follows the slider live
-        time.sleep(0.05)
-    pygame.mixer.music.unload()
+    STATUS["speaking"] = True
+    try:
+        pygame.mixer.music.load(path)
+        pygame.mixer.music.set_volume(max(0.0, min(1.0, STINGER_VOLUME)))
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.mixer.music.set_volume(max(0.0, min(1.0, STINGER_VOLUME)))   # follows the slider live
+            time.sleep(0.05)
+        pygame.mixer.music.unload()
+    finally:
+        STATUS["speaking"] = False
 
 
 def saved_tag_count():
@@ -1499,13 +1504,17 @@ def run_stinger(path, vol):
 
 
 def play_clip(path):
-    pygame.mixer.music.load(path)
-    pygame.mixer.music.set_volume(max(0.0, min(1.0, DJ_VOLUME)))
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.mixer.music.set_volume(max(0.0, min(1.0, DJ_VOLUME)))   # follows the slider live
-        time.sleep(0.1)
-    pygame.mixer.music.unload()  # release the file so Windows lets us delete it
+    STATUS["speaking"] = True
+    try:
+        pygame.mixer.music.load(path)
+        pygame.mixer.music.set_volume(max(0.0, min(1.0, DJ_VOLUME)))
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.mixer.music.set_volume(max(0.0, min(1.0, DJ_VOLUME)))   # follows the slider live
+            time.sleep(0.1)
+        pygame.mixer.music.unload()  # release the file so Windows lets us delete it
+    finally:
+        STATUS["speaking"] = False
 
 
 def set_volume(v):
@@ -1787,6 +1796,7 @@ def main():
         return n
 
     next_break_after = roll_interval()
+    STATUS["songs_left"] = max(0, next_break_after - songs_since_break)
 
     def build(song_name, last_info, style, duo=False):
         prepared["building"] = True
@@ -1842,6 +1852,7 @@ def main():
                 if state["uri"] != last_uri:
                     last_uri = state["uri"]
                     songs_since_break += 1
+                    STATUS["songs_left"] = max(0, next_break_after - songs_since_break)
                     songs_since_breaking += 1
                     songs_since_voice += 1
                     stinger.update(uri=None, path=None)
@@ -2030,6 +2041,7 @@ def main():
                 path = prepared["path"]
                 prepared["path"] = None
                 songs_since_break = 0
+                STATUS["songs_left"] = max(0, next_break_after - songs_since_break)
                 songs_since_voice = 0
                 p["tag"] = None
                 p["intro_sting"] = None
@@ -2041,6 +2053,7 @@ def main():
                     FORCE_TRANSITION = None
                 last_style = style
                 next_break_after = roll_interval()
+                STATUS["songs_left"] = max(0, next_break_after - songs_since_break)
                 if POPIN_ENABLED and style != "silent" and (POPIN_TEST_MODE or random.random() < POPIN_CHANCE):
                     if late:   # already inside the new song
                         plan_popin(state["uri"], state["track"], state["duration"])
