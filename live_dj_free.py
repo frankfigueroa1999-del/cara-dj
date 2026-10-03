@@ -1645,11 +1645,17 @@ def clip_length_ms(path):
         return 10000
 
 
+QUEUE_FILTER = None  # the app sets this: takes out the songs you removed from the queue (they're skipped)
+
+
 def get_next_track():
     """Details of the next song in Spotify's queue, or None (also None for segments/ads)."""
     try:
         q = sp.queue() or {}
-        nxt = (q.get("queue") or [None])[0]
+        items = q.get("queue") or []
+        if QUEUE_FILTER:
+            items = QUEUE_FILTER(items)
+        nxt = (items or [None])[0]
         return track_info(nxt)
     except Exception:
         return None

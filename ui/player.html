@@ -21,6 +21,9 @@
   const say = text => { document.getElementById('status').textContent = text; };
   const post = (type, data = {}) => fetch(`/event?k=${key}`, { method: 'POST', body: JSON.stringify({ type, ...data }) }).catch(() => {});
   let player = null, misses = 0, readyAt = 0;
+  // songs taken out of the queue in the app: skipped the moment they start (Spotify has no "remove from queue" for apps)
+  let skip = new Set(), lastUri = '';
+  window.__setSkip = list => { skip = new Set(Array.isArray(list) ? list : []); return skip.size; };
 
   async function token() {
     for (let i = 0; i < 4; i++) {
@@ -49,6 +52,13 @@
     player.addListener('account_error', ({ message }) => { say(message); post('error', { kind: 'account', message }); });
     player.addListener('playback_error', ({ message }) => { post('error', { kind: 'playback', message }); });
     player.addListener('autoplay_failed', () => { post('autoplay'); });
+    player.addListener('player_state_changed', st => {
+      const t = st && st.track_window && st.track_window.current_track;
+      if (!t || t.uri === lastUri) return;
+      lastUri = t.uri;
+      const hit = [t.uri, t.linked_from && t.linked_from.uri].find(u => u && skip.has(u));
+      if (hit && st.position < 6000) { skip.delete(hit); player.nextTrack().catch(() => {}); post('skipped', { uri: hit }); }
+    });
     player.connect().then(ok => { if (!ok) post('log', { message: 'the player could not connect to Spotify' }); });
   };
 
@@ -109,6 +119,7 @@
     try {
       const j = await (await fetch(`/ping?k=${key}&vis=${document.visibilityState}`)).json();
       misses = 0;
+      if (Array.isArray(j.skip)) window.__setSkip(j.skip);
       if (j.stop) { if (player) player.disconnect(); player = null; window.close(); }
     } catch (e) {
       if (++misses >= 3) { if (player) player.disconnect(); player = null; window.close(); }

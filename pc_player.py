@@ -217,7 +217,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if path == "/ping":
             p.seen = time.time()
             p.page_seen((self.query.get("vis") or [""])[0])
-            return self._send(200, {"stop": not p.wanted, "name": NAME})
+            return self._send(200, {"stop": not p.wanted, "name": NAME, "skip": p.skip})
         return self._send(404, {"error": "unknown"})
 
     def do_POST(self):
@@ -330,6 +330,8 @@ class Player:
         self.vis = ""                  # what the page says: "visible" or "hidden" (a hidden page loads no sound)
         self.hidden_since = None
         self.said_hidden = False
+        self.skip = []                 # songs to skip the moment they start (taken out of the queue in the app)
+        self.on_skipped = None
 
     # ------------------------------------------------------------ what the app sees
     def info(self):
@@ -432,6 +434,20 @@ class Player:
             raise RuntimeError("the browser's DevTools port never showed up")
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as r:
             return json.loads(r.read())
+
+    def set_skip(self, uris):
+        """The songs the page skips the moment they start; it also hears on its next check-in, every few seconds."""
+        uris = list(uris)
+        changed = uris != self.skip
+        self.skip = uris
+        if changed and self.status == "ready":
+            threading.Thread(target=lambda: self._quiet(f"window.__setSkip && window.__setSkip({json.dumps(uris)})"), daemon=True).start()
+
+    def _quiet(self, expression):
+        try:
+            self.devtools(expression, gesture=False, timeout=4.0)
+        except Exception:
+            pass
 
     def devtools(self, expression, gesture=True, frame=None, timeout=8.0):
         """Runs JavaScript in the player page (or, with frame=, in Spotify's frame inside it) as if you'd clicked there."""
@@ -581,3 +597,6 @@ class Player:
             self.restart("its copy protection wasn't ready", wait=3.0)
         elif kind == "log":
             print(f"[player: {str(e.get('message'))[:200]}]")
+        elif kind == "skipped":
+            if self.on_skipped:
+                self.on_skipped(str(e.get("uri") or ""))

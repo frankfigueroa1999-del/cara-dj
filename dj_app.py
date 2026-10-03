@@ -250,6 +250,11 @@ class App:
         self.sound_repaired = False     # started the player over once already because it was silent
         self.want_here = False          # "this PC" was picked in Play on: move the music here once the player's ready
         self.pending = {}               # a button's effect, shown until Spotify catches up: key -> (value, until)
+        self.qadded = []                # songs queued from this app, oldest first: {"uri", "at"} ("Next in queue")
+        self.qskip = []                 # songs taken out of the queue: {"uri", "nth", "at", "section", "title"}
+        self.qlock = threading.Lock()
+        self.played_at = 0.0            # when you last started something yourself (its first song is never skipped)
+        self.builtin.on_skipped = self.queue_skipped
         self.notice, self.notice_n = None, 0
         if not self.cfg.get("player_rechecked"):
             # Before, the built-in player's hidden window loaded no sound, so many switched to the Spotify app.
@@ -360,6 +365,7 @@ class App:
         else:
             self.dj = importlib.reload(self.dj)
         pc_spotify.sp = self.dj.sp
+        self.dj.QUEUE_FILTER = self.filter_queue    # Cara won't announce a song you took out of the queue
         self.apply_settings()
 
     def connect(self, force=False):
@@ -414,6 +420,7 @@ class App:
         self.now = None
         pc_spotify.forget_home()
         pc_spotify.forget_feed()
+        self.forget_queue()
         pc_spotify._me.update(at=0, value=None)
         print("Logged out of Spotify.")
 
@@ -648,11 +655,172 @@ class App:
             self.context_name = pc_spotify.context_name(ctx) if ctx else ""
             if t["uri"] != last_uri:
                 last_uri = t["uri"]
+                try:
+                    self.queue_moved(t["uri"])
+                except Exception as e:
+                    print(f"[queue: {e}]")
                 if t["uri"] and t["uri"] not in self.liked:
                     got = pc_spotify.contains([t["uri"]])
                     if got:
                         self.liked[t["uri"]] = bool(got[0])
             self.now = self._settle(pb)
+            left = (t.get("duration") or 0) - (pb.get("progress") or 0)
+            if self.qskip and pb.get("playing") and 0 < left < 1600 and not self._builtin_playing():
+                threading.Timer(left / 1000 + 0.25, self.poke.set).start()     # catch a song you took out as it starts
+
+    # ------------------------------------------------------------ the queue
+    # Spotify's queue doesn't say which songs you queued and which come from the playlist, so the app remembers what
+    # you queue from here ("Next in queue"). Spotify has no "remove from queue" for apps either: a song you take out
+    # is hidden here and skipped the moment it comes up (by the built-in player itself, before you hear it).
+    def queue_add(self, uri):
+        ok = pc_spotify.safe(lambda: pc_spotify.post("me/player/queue", uri=uri) or True, False)
+        if ok:
+            with self.qlock:
+                self.qadded.append({"uri": uri, "at": time.time()})
+        return bool(ok)
+
+    def _queue_raw(self):
+        j = pc_spotify.safe(lambda: pc_spotify.get("me/player/queue")) or {}
+        return [t for t in (pc_spotify.track(x) for x in j.get("queue") or []) if t]
+
+    def filter_queue(self, items):
+        """What's coming up, without the songs you took out (each by the time it comes round, in case it's in there twice)."""
+        with self.qlock:
+            hide = {}
+            for e in self.qskip:
+                hide.setdefault(e["uri"], set()).add(e["nth"])
+        seen, out = {}, []
+        for t in items or []:
+            u = t.get("uri") if isinstance(t, dict) else ""
+            k = seen.get(u, 0)
+            seen[u] = k + 1
+            if u and k in hide.get(u, ()):
+                continue
+            out.append(t)
+        return out
+
+    def queue_view(self):
+        """The queue as Spotify shows it: Next in queue (what you queued from here), then Next from the playlist."""
+        items = self.filter_queue(self._queue_raw())
+        with self.qlock:
+            pending = [e["uri"] for e in self.qadded]
+            head = []
+            for t in items:
+                if t["uri"] in pending:
+                    pending.remove(t["uri"])
+                    head.append(t)
+                else:
+                    break
+            found = collections.Counter(t["uri"] for t in head)
+            keep = []
+            for e in self.qadded:            # forget what played elsewhere or was cleared, once Spotify's had time to show it
+                if found[e["uri"]] > 0:
+                    found[e["uri"]] -= 1
+                    keep.append(e)
+                elif time.time() - e["at"] < 20:
+                    keep.append(e)
+            self.qadded = keep
+        return {"queued": head, "next": items[len(head):len(head) + 40], "from": self.context_name}
+
+    def up_next(self):
+        return self.filter_queue(self._queue_raw())[:30]
+
+    def queue_remove(self, uri, nth=0, section="next"):
+        """Takes the nth time a song shows in the queue out of it (Spotify can't, so it's skipped when it comes round)."""
+        raw = self._queue_raw()
+        with self.qlock:
+            hide = {}
+            for e in self.qskip:
+                hide.setdefault(e["uri"], set()).add(e["nth"])
+        seen, shown, target, title = {}, -1, None, ""
+        for t in raw:
+            u = t["uri"]
+            k = seen.get(u, 0)
+            seen[u] = k + 1
+            if k in hide.get(u, ()):
+                continue
+            if u == uri:
+                shown += 1
+                if shown == int(nth or 0):
+                    target, title = k, f"{t['title']} by {t['artistLine']}"
+                    break
+        if target is None:
+            return "That song isn't in the queue any more."
+        with self.qlock:
+            self.qskip.append({"uri": uri, "nth": target, "at": time.time(), "section": section, "title": title})
+            if section == "queued":
+                for i, e in enumerate(self.qadded):
+                    if e["uri"] == uri:
+                        del self.qadded[i]
+                        break
+        self._push_skip()
+        print(f"[queue: took {title} out of the queue; it'll be skipped when it comes round]")
+        return True
+
+    def _push_skip(self):
+        """Tells the built-in player which songs to skip the moment they start."""
+        with self.qlock:
+            self.qskip = [e for e in self.qskip if time.time() - e["at"] < 6 * 3600]
+            due = [e["uri"] for e in self.qskip if e["nth"] == 0]
+        self.builtin.set_skip(due)
+
+    def queue_moved(self, uri):
+        """A new song started: it's off what you queued, and if you took it out of the queue, it's skipped."""
+        if not uri or time.time() - self.played_at < 4:           # you just picked it yourself
+            return
+        builtin = self._builtin_playing()
+        with self.qlock:
+            target = next((e for e in self.qskip if e["uri"] == uri and e["nth"] == 0), None)
+            moved = False
+            for e in self.qskip:
+                if e["uri"] == uri and e is not target:
+                    e["nth"] = max(0, e["nth"] - 1)                 # an earlier time it was in the queue just came round
+                    moved = True
+            if target:
+                self.qskip.remove(target)
+            else:
+                for i, e in enumerate(self.qadded):
+                    if e["uri"] == uri:
+                        del self.qadded[i]
+                        break
+        if target or moved:
+            self._push_skip()
+        if not target:
+            return
+        print(f"[queue: skipping {target['title']} (you took it out of the queue)]")
+        if builtin:                       # the player page skips it by itself; if it hasn't in a moment, do it from here
+            threading.Timer(2.5, lambda: self._skip_if_still(uri)).start()
+        else:
+            self.player("next")
+
+    def queue_skipped(self, uri):
+        """The built-in player skipped a song you took out of the queue."""
+        with self.qlock:
+            target = next((e for e in self.qskip if e["uri"] == uri and e["nth"] == 0), None)
+            if not target:
+                return
+            self.qskip.remove(target)
+            for e in self.qskip:
+                if e["uri"] == uri:
+                    e["nth"] = max(0, e["nth"] - 1)
+        print(f"[queue: skipped {target['title']} (you took it out of the queue)]")
+        self._push_skip()
+        threading.Timer(0.3, self.poke.set).start()
+
+    def _skip_if_still(self, uri):
+        t = (self.now or {}).get("track") or {}
+        if t.get("uri") == uri:
+            self.player("next")
+
+    def _builtin_playing(self):
+        d = (self.now or {}).get("device") or {}
+        b = self.builtin
+        return b.status == "ready" and bool(d.get("id")) and (d.get("id") == b.device_id or d.get("id") in b.past_ids)
+
+    def forget_queue(self):
+        with self.qlock:
+            self.qadded, self.qskip = [], []
+        self._push_skip()
 
     def check_sleep(self, pb):
         """The sleep timer: pauses Spotify (and Cara) when it's up."""
@@ -778,6 +946,10 @@ class App:
             body["offset"] = {"uri": offset_uri}
         elif position is not None:
             body["offset"] = {"position": int(position)}
+        self.played_at = time.time()
+        with self.qlock:                                # a new playlist: what you took out of the old one doesn't matter now
+            self.qskip = [e for e in self.qskip if e.get("section") == "queued"]
+        self._push_skip()
         mine = None
         if shuffle and context and not offset_uri and position is None:
             mine = self.shuffle_start(context)          # Spotify starts a playlist at the top even with shuffle on
@@ -1064,7 +1236,15 @@ class Api:
 
     @guard
     def queue_add(self, uri):
-        return bool(pc_spotify.safe(lambda: pc_spotify.post("me/player/queue", uri=uri) or True, False))
+        return self._app.queue_add(uri)
+
+    @guard
+    def queue_remove(self, uri, nth=0, section="next"):
+        return self._app.queue_remove(uri, int(nth or 0), "queued" if section == "queued" else "next")
+
+    @guard
+    def queue(self):
+        return self._app.queue_view()
 
     @guard
     def devices(self):
@@ -1093,7 +1273,7 @@ class Api:
 
     @guard
     def up_next(self):
-        return pc_spotify.up_next()
+        return self._app.up_next()
 
     @guard
     def sleep(self, minutes=None):

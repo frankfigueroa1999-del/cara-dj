@@ -197,6 +197,11 @@ body.lib-mini .lib-item { grid-template-columns: 48px; justify-content: center; 
 .nv-next .q-row { padding: 6px; margin: 0 -6px; }
 .nv-quiet { color: var(--text2); font-size: 13.5px; }
 .nv-queue h4 { margin: 4px 2px 8px; font: 700 15px var(--display); }
+.nv-queue h4.gap { margin-top: 20px; }
+#nowview:not(.q) .nv-q-only, #nowview.q .nv-now-only { display: none; }
+.page-shuffle { position: relative; width: 46px; height: 46px; }
+.page-shuffle.on { color: var(--accent); }
+.page-shuffle.on::after { content: ""; position: absolute; bottom: 3px; left: 50%; width: 5px; height: 5px; margin-left: -2.5px; border-radius: 50%; background: var(--accent); }
 .nv-queue .q-row.now b { color: var(--accent); }
 
 /* ---------------------------------------------------------------- the player bar */
