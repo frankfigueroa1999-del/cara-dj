@@ -450,6 +450,22 @@ VIEWS.genre = {
   },
   load: async r => { const d = await api.genre(r.id); if (d && !d.error) { r.data = d; remember(d.tracks); } },
 };
+VIEWS.radio = {
+  title: r => (r.data && r.data.title) || 'Song radio',
+  html: r => {
+    const d = r.data;
+    if (!d) return r.loaded ? empty('warning', "Couldn't make this radio", "Spotify didn't answer. Try again in a moment.") : loading();
+    const s = d.seed;
+    const from = [d.artists.join(' and '), d.friends.length ? 'the artists they work with' : '', d.genres.length ? d.genres.slice(0, 2).join(' and ') : ''].filter(Boolean);
+    return `<div class="page-hero">${art(s.art || s.artMid, 236, { icon: 'radio' })}<div class="meta"><div class="caps">Song radio</div><h1>${esc(d.title)}</h1>
+      <div class="about">Songs that go with ${esc(s.title)}: ${esc(from.join(', '))}.</div>
+      <div class="line"><b>${esc(s.artistLine)}</b> • ${plural(d.tracks.length, 'song')}</div></div></div>
+      <div class="actions-row"><button class="big-play" data-act="play-list" data-list="${r.list || (r.list = listOf(d.tracks))}" data-name="${esc(d.title)}" title="Play">${icon('play', 28)}</button>
+        <button class="icon-btn" style="width:46px;height:46px" data-act="play-list" data-list="${r.list}" data-shuffle="1" data-name="${esc(d.title)}" title="Shuffle">${icon('shuffle', 26)}</button></div>
+      ${trackTable(d.tracks, { list: r.list })}`;
+  },
+  load: async r => { const d = await api.song_radio(r.id); if (d && !d.error) { r.data = d; remember(d.tracks); checkLiked(d.tracks).then(() => S.route === r && refresh()); } },
+};
 function tile(h) { return `linear-gradient(135deg, hsl(${h * 360} 62% 50%), hsl(${((h + .06) % 1) * 360} 78% 30%))`; }
 
 VIEWS.search = {
@@ -735,33 +751,133 @@ function syncLyrics(p) {
 }
 
 // ---------------------------------------------------------------- menus and sheets
+function menuHtml(items) {
+  return items.map((it, i) => it === '-' ? '<hr>' : it.head ? `<div class="menu-head">${esc(it.head)}</div>`
+    : `<button data-i="${i}" class="${it.on ? 'on' : ''}${it.sub ? ' has-sub' : ''}">${icon(it.icon || 'note', 18)}<span class="ell">${esc(it.label)}</span>${it.sub ? `<span class="sub-arrow">${icon('forward', 16)}</span>` : ''}</button>`).join('');
+}
+// A menu; items with `sub` (a list, or a function that makes one) open a second menu beside it, like Spotify's
 function showMenu(items, x, y) {
   closeMenu();
-  const m = document.createElement('div'); m.id = 'menu';
-  m.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : it.head ? `<div class="menu-head">${esc(it.head)}</div>` : `<button data-i="${i}" class="${it.on ? 'on' : ''}">${icon(it.icon || 'note', 18)}<span class="ell">${esc(it.label)}</span></button>`).join('');
+  const m = document.createElement('div'); m.id = 'menu'; m.className = 'menu';
+  m.innerHTML = menuHtml(items);
   document.body.appendChild(m);
-  const r = m.getBoundingClientRect();
-  m.style.left = Math.min(x, innerWidth - r.width - 10) + 'px';
-  m.style.top = Math.min(y, innerHeight - r.height - 10) + 'px';
-  m.addEventListener('click', e => { const b = e.target.closest('button[data-i]'); if (!b) return; e.stopPropagation(); closeMenu(); items[+b.dataset.i].run(); });
+  // sizes from layout (offset*), not getBoundingClientRect: the menu pops in scaled down, which would skew them
+  const mx = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 10)), my = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 10));
+  m.style.left = mx + 'px';
+  m.style.top = my + 'px';
+  let timer = null, opening = 0;
+  const openSub = async b => {
+    const s0 = $('#menu-sub');
+    if (s0 && s0.dataset.from === b.dataset.i) return;
+    closeSub();
+    const it = items[+b.dataset.i], ticket = ++opening;
+    const sub = typeof it.sub === 'function' ? await it.sub() : it.sub;
+    if (ticket !== opening || !document.body.contains(m) || !sub || !sub.length) return;
+    const s = document.createElement('div'); s.id = 'menu-sub'; s.className = 'menu'; s.dataset.from = b.dataset.i;
+    s.innerHTML = menuHtml(sub);
+    document.body.appendChild(s);
+    const sw = s.offsetWidth, sh = s.offsetHeight;
+    let left = mx + m.offsetWidth - 4;
+    if (left + sw > innerWidth - 8) left = mx - sw + 4;          // no room on the right: open on the left
+    s.style.left = Math.max(8, left) + 'px';
+    s.style.top = Math.max(8, Math.min(my + b.offsetTop - 6, innerHeight - sh - 8)) + 'px';
+    b.classList.add('open');
+    s.addEventListener('click', e => { const sb = e.target.closest('button[data-i]'); if (!sb) return; e.stopPropagation(); const si = sub[+sb.dataset.i]; closeMenu(); if (si.run) si.run(); });
+  };
+  m.addEventListener('mouseover', e => {
+    const b = e.target.closest('button[data-i]'); if (!b) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => { if (items[+b.dataset.i].sub) openSub(b); else { opening++; closeSub(); } }, 120);
+  });
+  m.addEventListener('click', e => {
+    const b = e.target.closest('button[data-i]'); if (!b) return;
+    e.stopPropagation();
+    const it = items[+b.dataset.i];
+    if (it.sub) { clearTimeout(timer); openSub(b); return; }
+    closeMenu(); if (it.run) it.run();
+  });
 }
-function closeMenu() { const m = $('#menu'); if (m) m.remove(); }
+function closeSub() { const s = $('#menu-sub'); if (s) s.remove(); const o = document.querySelector('#menu button.open'); if (o) o.classList.remove('open'); }
+function closeMenu() { closeSub(); const m = $('#menu'); if (m) m.remove(); }
 function trackMenu(uri, x, y) {
   const t = S.tracks.get(uri) || (nowUri() === uri ? nowTrack() : null); if (!t) return;
   const liked = S.liked.get(uri) || (nowUri() === uri && now().liked);
-  const items = [
-    { label: 'Add to queue', icon: 'queue', run: async () => toast((await api.queue_add(uri)) ? 'Added to the queue' : "Spotify wouldn't queue that.", 'queue') },
-    { label: liked ? 'Remove from Liked Songs' : 'Add to Liked Songs', icon: liked ? 'heart' : 'heartOutline', run: () => toggleLike(uri) },
-    { label: 'Add to a playlist…', icon: 'playlistAdd', run: () => addToPlaylist(t) },
-    '-',
-  ];
+  const arts = (t.artists || []).filter(a => a.id);
+  const link = t.id ? `https://open.spotify.com/track/${t.id}` : '';
+  const out = isExcluded(t);
+  const items = [];
+  if (t.id) items.push({ label: 'Add to playlist', icon: 'plus', sub: () => playlistItems(t) },
+    { label: liked ? 'Remove from Liked Songs' : 'Save to your Liked Songs', icon: liked ? 'heart' : 'heartOutline', on: !!liked, run: () => toggleLike(uri) });
+  items.push({ label: 'Add to queue', icon: 'queue', run: async () => toast((await api.queue_add(uri)) ? 'Added to the queue' : "Spotify wouldn't queue that.", 'queue') });
+  if (t.id) items.push({ label: out ? 'Include in your taste profile' : 'Exclude from your taste profile', icon: out ? 'checkCircle' : 'close', run: () => tasteToggle(t, !out) },
+    { label: 'Start a Jam', icon: 'people', run: () => jamSheet(t) });
+  items.push({ label: 'Sleep timer', icon: 'moon', sub: sleepItems }, '-');
+  if (t.id) items.push({ label: 'Go to song radio', icon: 'radio', run: () => go({ name: 'radio', id: t.id }) });
+  if (arts.length > 1) items.push({ label: 'Go to artist', icon: 'person', sub: arts.map(a => ({ label: a.name, icon: 'person', run: () => go({ name: 'artist', id: a.id }) })) });
+  else if (arts.length) items.push({ label: 'Go to artist', icon: 'person', run: () => go({ name: 'artist', id: arts[0].id }) });
   if (t.albumId) items.push({ label: 'Go to album', icon: 'album', run: () => go({ name: 'album', id: t.albumId }) });
-  const aid = t.artists && t.artists[0] && t.artists[0].id;
-  if (aid) items.push({ label: 'Go to artist', icon: 'mic', run: () => go({ name: 'artist', id: aid }) });
-  if (t.id) items.push({ label: 'Copy song link', icon: 'link', run: () => copy(`https://open.spotify.com/track/${t.id}`) });
+  if (t.id) items.push({ label: 'View credits', icon: 'note', run: () => creditsSheet(t) }, '-',
+    { label: 'Share', icon: 'share', sub: [
+      { label: 'Copy song link', icon: 'link', run: () => copy(link) },
+      { label: 'Copy embed code', icon: 'note', run: () => copy(`<iframe style="border-radius:12px" src="https://open.spotify.com/embed/track/${t.id}" width="100%" height="152" frameBorder="0" allowfullscreen="" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>`, 'Embed code copied') },
+      { label: 'Copy song and artist', icon: 'quote', run: () => copy(`${t.title} - ${t.artistLine}`, 'Copied') }] });
   showMenu(items, x, y);
 }
-function copy(text) { navigator.clipboard.writeText(text).then(() => toast('Link copied', 'link'), () => toast(text, 'link')); }
+async function playlistItems(t) {
+  if (!S.home) await loadHome();
+  const mine = ((S.home && S.home.playlists) || []).filter(p => p.ownerId === myId() || p.collaborative);
+  const add = async pid => { const ok = await api.add_to_playlist(pid, t.uri); toast(ok === true ? 'Added to the playlist' : "Spotify wouldn't add it.", ok === true ? 'check' : 'warning'); loadHome(true); };
+  return [{ label: 'New playlist', icon: 'plus', run: async () => { const p = await askName(); if (p) add(p.id); } },
+    ...(mine.length ? ['-'] : []), ...mine.map(p => ({ label: p.name, icon: 'queue', run: () => add(p.id) }))];
+}
+// "Exclude from your taste profile": Cara and Scratch stop reading anything into the song. Spotify's own taste
+// profile can only be changed in the Spotify app (apps like this one can't), so that's offered too.
+const tasteKey = t => `${t.title}|${t.artist}`.toLowerCase();
+function isExcluded(t) { if (!S.excluded) S.excluded = new Set((S.boot && S.boot.excluded) || []); return S.excluded.has(tasteKey(t)); }
+async function tasteToggle(t, on) {
+  const r = await api.taste_exclude(t.title, t.artist, on);
+  if (r !== true) return toast("Couldn't change that.", 'warning');
+  isExcluded(t); S.excluded[on ? 'add' : 'delete'](tasteKey(t));
+  if (!on) return toast('Back in your taste profile', 'checkCircle');
+  sheet('Excluded from your taste profile', `${songRow(t)}
+    <p>Cara and Scratch won't read anything into this song any more. Played it for someone else? It doesn't say a thing about you now.</p>
+    <p class="muted">Spotify keeps its own taste profile (for your Discover Weekly and Wrapped), and only the Spotify app can change that one. Open the song there and pick Exclude from your taste profile in its ••• menu.</p>
+    <div class="sheet-buttons"><button class="pill secondary" data-act="sheet-close">Done</button><button class="pill primary" data-act="open-spotify-song" data-uri="${esc(t.uri)}">Open in Spotify</button></div>`);
+}
+function songRow(t) { return `<div class="pick-row" style="cursor:default">${art(t.artMid, 44)}<div class="ell"><b class="ell">${esc(t.title)}</b><small class="muted">${esc(t.artistLine)}</small></div></div>`; }
+// Jams are Spotify's own: only the Spotify app can start or join one, so these hand over to it
+function jamSheet(t) {
+  sheet('Start a Jam', `${songRow(t)}
+    <p>In a Jam, friends add songs and listen along with you. Spotify only lets its own app start one.</p>
+    <ol class="steps"><li>Open this song in Spotify.</li><li>Right-click the song there (or use its ••• button) and pick <b>Start a Jam</b>, then share the Jam link.</li>
+      <li>Keep this app open: while the Jam plays on your account, it shows what's playing and Cara keeps doing her breaks.</li></ol>
+    <div class="sheet-buttons"><button class="pill secondary" data-act="sheet-close">Not now</button><button class="pill primary" data-act="open-spotify-song" data-uri="${esc(t.uri)}">Open in Spotify</button></div>`);
+}
+function joinJamSheet() {
+  const w = sheet('Join a Jam', `<p>Paste the Jam link a friend sent you. Jams are joined in Spotify itself, so it opens there.</p>
+    <div class="field"><label>Jam link</label><div class="box"><input id="jam-link" placeholder="https://spotify.link/…" spellcheck="false"></div></div>
+    <p class="muted">Keep this app open while you're in: when the Jam plays on your account, it shows what's playing and Cara keeps doing her breaks.</p>
+    <div class="sheet-buttons"><button class="pill secondary" data-act="sheet-close">Cancel</button><button class="pill primary" data-join>Open in Spotify</button></div>`);
+  const send = async () => { const r = await api.join_jam($('#jam-link').value); if (r === true) { closeSheet(); toast('Opening the Jam in Spotify', 'people'); } else toast((r && r.error) || r || "That link didn't open.", 'warning'); };
+  w.querySelector('[data-join]').addEventListener('click', send);
+  w.querySelector('#jam-link').addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+  setTimeout(() => { const i = $('#jam-link'); if (i) i.focus(); }, 60);
+}
+async function creditsSheet(t) {
+  const w = sheet('Credits', `${songRow(t)}<div id="credits-body">${loading()}</div>`);
+  const d = await api.credits(t.id);
+  const box = w.querySelector('#credits-body');
+  if (!box || !document.body.contains(w)) return;
+  if (!d || d.error) { box.innerHTML = empty('warning', "Couldn't load the credits", "Spotify didn't answer. Try again in a moment."); return; }
+  const group = (label, names) => names && names.length ? `<div class="credit"><div class="caps">${esc(label)}</div><div>${names.map(esc).join(', ')}</div></div>` : '';
+  const made = d.writers.length || d.producers.length || d.more.length;
+  box.innerHTML = `<div class="credits">${group('Performed by', d.performers)}${group('Written by', d.writers)}${group('Produced by', d.producers)}
+      ${d.more.map(r => group(r.role, r.names)).join('')}
+      ${group('Album', d.album ? [d.album + (d.released ? ` (${d.released.slice(0, 4)})` : '')] : [])}${group('Label', d.label ? [d.label] : [])}
+      ${d.copyrights.length ? `<div class="credit muted">${d.copyrights.map(esc).join('<br>')}</div>` : ''}</div>
+    <div class="note">${made ? '' : "Writers and producers aren't listed for this song yet. "}From Spotify${d.musicbrainz ? ` and <button class="link" data-act="open-url" data-url="${esc(d.musicbrainz)}">MusicBrainz</button>, the open music encyclopedia` : ''}.</div>`;
+}
+function copy(text, done = 'Link copied') { navigator.clipboard.writeText(text).then(() => toast(done, 'link'), () => toast(text, 'link')); }
 function sheet(title, body, wide) {
   closeSheet();
   const w = document.createElement('div'); w.id = 'sheet-wrap';
@@ -829,16 +945,17 @@ async function devicesMenu(x, y) {
     const onPc = pc && d.type === 'computer' && (d.name || '').toLowerCase() === pc;    // the Spotify app on this PC
     items.push({ label: (onPc ? 'Spotify app on this PC' : d.name) + (d.active ? '  (playing)' : ''), icon: d.type === 'computer' ? 'computer' : d.type === 'smartphone' ? 'phone' : 'speaker', on: d.active, run: async () => { if (!d.restricted) { await api.transfer(d.id); toast(`Playing on ${onPc ? 'the Spotify app' : d.name}`, 'speaker'); poke(); } } });
   }
-  items.push('-', { label: `Cara's voice: ${out}`, icon: 'mic', run: () => {} });
+  items.push('-', { label: 'Join a Jam…', icon: 'people', run: () => joinJamSheet() }, { label: `Cara's voice: ${out}`, icon: 'mic', run: () => {} });
   showMenu(items, x, y);
 }
-function sleepMenu(x, y) {
+function sleepItems() {
   const s = S.state && S.state.sleep;
-  const items = [{ head: 'Sleep timer' }];
+  const items = [];
   for (const [label, m] of [['15 minutes', 15], ['30 minutes', 30], ['45 minutes', 45], ['1 hour', 60], ['End of this song', -1]]) items.push({ label, icon: 'moon', run: async () => { await api.sleep(m); toast(m === -1 ? 'Stopping after this song' : `Stopping in ${label}`, 'moon'); } });
   if (s && (s.at || s.endOfSong)) items.push('-', { label: 'Turn off the sleep timer', icon: 'close', run: async () => { await api.sleep(0); toast('Sleep timer off', 'moon'); } });
-  showMenu(items, x, y);
+  return items;
 }
+function sleepMenu(x, y) { showMenu([{ head: 'Sleep timer' }, ...sleepItems()], x, y); }
 
 // ---------------------------------------------------------------- Settings
 function settingsSheet() {
@@ -930,6 +1047,8 @@ const ACTIONS = {
     else toast("Spotify wouldn't save that.", 'warning');
   },
   'share': el => copy(el.dataset.url),
+  'open-url': el => api.open_url(el.dataset.url),
+  'open-spotify-song': async el => { const r = await api.open_in_spotify(el.dataset.uri); closeSheet(); toast(r === 'app' ? 'Opened in the Spotify app' : r === 'web' ? 'Opened in Spotify on the web' : (r && r.error) || r, r === 'app' || r === 'web' ? 'open' : 'warning'); },
   'artist-more': () => { S.route.allTop = !S.route.allTop; refresh(); },
   'new-playlist': () => askName(),
   'settings': () => settingsSheet(),
@@ -977,7 +1096,7 @@ function cmd(action, value) {
 }
 
 document.addEventListener('click', e => {
-  if (!e.target.closest('#menu')) closeMenu();
+  if (!e.target.closest('#menu, #menu-sub')) closeMenu();
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
   const f = ACTIONS[el.dataset.act];

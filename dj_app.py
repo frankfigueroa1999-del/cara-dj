@@ -162,6 +162,33 @@ def load_config():
     return cfg
 
 
+def taste_excluded():
+    """Songs taken out of your taste profile ("title|artist", lower case): the DJs don't read anything into them."""
+    try:
+        with open(os.path.join(APP_DIR, "taste-excluded.json"), encoding="utf-8") as f:
+            return [k for k in json.load(f) if isinstance(k, str)]
+    except Exception:
+        return []
+
+
+def spotify_app_installed():
+    """Is the Spotify app on this PC (it owns spotify: links)? Checked first, because Windows otherwise offers to find
+    an app in the Store."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+    for hive, path in ((winreg.HKEY_CLASSES_ROOT, "spotify"),
+                       (winreg.HKEY_CURRENT_USER, r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion"
+                                                  r"\AppModel\PackageRepository\Extensions\windows.protocol\spotify"),
+                       (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\spotify\UserChoice")):
+        try:
+            winreg.CloseKey(winreg.OpenKey(hive, path))
+            return True
+        except OSError:
+            pass
+    return False
+
+
 def save_config(cfg):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
@@ -877,7 +904,7 @@ class Api:
     @guard
     def boot(self):
         first, pc = who_is_here()
-        return {"config": self._app.public_config(), "first": first, "pc": pc, "version": VERSION,
+        return {"config": self._app.public_config(), "first": first, "pc": pc, "version": VERSION, "excluded": taste_excluded(),
                 "redirect": REDIRECT_URI, "genres": pc_spotify.GENRES}
 
     @guard
@@ -907,6 +934,62 @@ class Api:
         if isinstance(url, str) and url.startswith(("https://", "http://", "spotify:")):
             webbrowser.open(url)
         return True
+
+    @guard
+    def open_in_spotify(self, uri):
+        """Opens a song in the Spotify app when it's installed, otherwise on open.spotify.com. Says which ("app"/"web")."""
+        m = re.fullmatch(r"spotify:(track|album|playlist|artist):([A-Za-z0-9]{10,40})", uri or "")
+        if not m:
+            return "That isn't something Spotify can open."
+        if spotify_app_installed():
+            try:
+                os.startfile(uri)                      # the Spotify app (it owns spotify: links)
+                return "app"
+            except OSError:
+                pass
+        webbrowser.open(f"https://open.spotify.com/{m.group(1)}/{m.group(2)}")
+        return "web"
+
+    @guard
+    def join_jam(self, link):
+        """A Jam link a friend sent: Jams are joined in Spotify itself, so it opens there."""
+        link = (link or "").strip()
+        ok = re.match(r"https://(spotify\.link|spotify\.app\.link|open\.spotify\.com)/\S+$", link) or re.match(r"spotify:\S+$", link)
+        if not ok:
+            return "That doesn't look like a Spotify Jam link. It starts with https://spotify.link/ or https://open.spotify.com/."
+        if link.startswith("spotify:"):
+            if not spotify_app_installed():
+                return "The Spotify app isn't installed on this PC, so that link can't open."
+            try:
+                os.startfile(link)
+                return True
+            except OSError:
+                return "The Spotify app couldn't open that link."
+        webbrowser.open(link)
+        print(f"[jam: opened {link[:60]} in Spotify]")
+        return True
+
+    @guard
+    def taste_exclude(self, title, artist, on):
+        """Exclude from your taste profile (or put back): Cara and Scratch stop reading anything into that song."""
+        key = f"{title or ''}|{artist or ''}".lower()
+        keys = set(taste_excluded())
+        if on:
+            keys.add(key)
+        else:
+            keys.discard(key)
+        with open(os.path.join(APP_DIR, "taste-excluded.json"), "w", encoding="utf-8") as f:
+            json.dump(sorted(keys)[-2000:], f)
+        print(f"[taste profile: {title} {'excluded' if on else 'back in'}]")
+        return True
+
+    @guard
+    def song_radio(self, tid):
+        return pc_spotify.song_radio(tid)
+
+    @guard
+    def credits(self, tid):
+        return pc_spotify.credits(tid)
 
     @guard
     def open_stingers(self):

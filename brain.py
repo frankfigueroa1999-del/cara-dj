@@ -391,9 +391,31 @@ def song_lyrics(info):
     return plain
 
 
+_EXCLUDED = {"mtime": None, "keys": set()}
+
+
+def taste_excluded(info):
+    """Songs the listener took out of their taste profile (right-click a song in the app): the DJs read nothing into them."""
+    path = os.path.join(_app_dir(), "taste-excluded.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+    if mtime != _EXCLUDED["mtime"]:
+        try:
+            with open(path, encoding="utf-8") as f:
+                _EXCLUDED["keys"] = {k for k in json.load(f) if isinstance(k, str)}
+        except Exception:
+            _EXCLUDED["keys"] = set()
+        _EXCLUDED["mtime"] = mtime
+    return f'{info.get("title") or ""}|{info.get("artist") or ""}'.lower() in _EXCLUDED["keys"]
+
+
 def song_read(info):
     """The song the listener picked, and what it's about. None when there's no song to read."""
     if not info or not info.get("title"):
+        return None
+    if taste_excluded(info):
         return None
     full = song_lyrics(info)
     if full and mentions_death(full):

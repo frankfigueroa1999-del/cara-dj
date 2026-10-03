@@ -561,3 +561,182 @@ def about(t):
     a = out.get("artist") or {}
     return {"song": "" if song == bio else song, "bio": bio, "genres": (a.get("genres") or [])[:4],
             "artistImage": a.get("image") or "", "followers": a.get("followers") or 0}
+
+
+# ---------------------------------------------------------------- song radio
+def song_radio(tid):
+    """A station built from one song: the song, more by its artists, the artists they work with, and their genres.
+    (Spotify's own song radio isn't open to apps like this one.)"""
+    seed = track(safe(lambda: get(f"tracks/{tid}")))
+    if not seed:
+        return None
+    mains = [a for a in seed["artists"] if a.get("name")][:2]
+    main_ids = {a["id"] for a in seed["artists"] if a.get("id")}
+    pools = {}
+
+    def run(key, q, offset=0):
+        j = safe(lambda: get("search", q=q, type="track", limit=10, offset=offset)) or {}
+        pools[key] = [t for t in (track(x) for x in (j.get("tracks") or {}).get("items") or []) if t and not t["local"]]
+
+    def wave(jobs):
+        threads = [threading.Thread(target=run, args=j, daemon=True) for j in jobs]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(20)
+
+    first = [(f"a{i}{o}", f'artist:"{a["name"]}"', o) for i, a in enumerate(mains) for o in (0, 10)]
+    lead = artist(safe(lambda: get(f"artists/{mains[0]['id']}"))) if mains and mains[0].get("id") else None
+    genres = ((lead or {}).get("genres") or [])[:3]
+    first += [(f"g{i}", f'genre:"{g}"', 0) for i, g in enumerate(genres)]
+    wave(first)
+    # the artists they make songs with (featured, or featuring them)
+    seen_with = {}
+    for key, items in pools.items():
+        if key.startswith("a"):
+            for t in items:
+                if main_ids & {x["id"] for x in t["artists"]}:
+                    for x in t["artists"]:
+                        if x.get("id") and x["id"] not in main_ids and x.get("name"):
+                            seen_with[x["name"]] = seen_with.get(x["name"], 0) + 1
+    friends = sorted(seen_with, key=lambda n: -seen_with[n])[:4]
+    wave([(f"c{i}", f'artist:"{n}"', 0) for i, n in enumerate(friends)])
+    # mix: the song first, then take turns between the sources, never the same song (or version) twice
+    order = ["a00", "c0", "g0", "a10", "c1", "g1", "a010", "c2", "g2", "a110", "c3"]
+    queues = [list(pools.get(k) or []) for k in order]
+    out, keys = [seed], {seed["uri"], (_bare(seed["title"]) + "|" + seed["artist"]).lower()}
+    while len(out) < 50 and any(queues):
+        for q in queues:
+            while q:
+                t = q.pop(0)
+                k = (_bare(t["title"]) + "|" + t["artist"]).lower()
+                if t["uri"] in keys or k in keys:
+                    continue
+                keys.update((t["uri"], k))
+                out.append(t)
+                break
+    return {"seed": seed, "title": f"{seed['title']} Radio", "tracks": out[:50],
+            "artists": [a["name"] for a in mains], "genres": genres, "friends": friends}
+
+
+# ---------------------------------------------------------------- credits
+MB = "https://musicbrainz.org/ws/2"
+MB_AGENT = "NonStopPopDJ/3 ( https://github.com/frankfigueroa1999-del/cara-dj )"   # MusicBrainz asks apps to say who they are
+_mb_lock = threading.Lock()
+_mb_last = [0.0]
+_credits = {}
+
+
+def _mb(path, **params):
+    """One MusicBrainz request (they ask for no more than one a second)."""
+    with _mb_lock:
+        wait = 1.05 - (time.time() - _mb_last[0])
+        if wait > 0:
+            time.sleep(wait)
+        _mb_last[0] = time.time()
+    params["fmt"] = "json"
+    r = requests.get(f"{MB}/{path}", params=params, timeout=12, headers={"User-Agent": MB_AGENT, "Accept": "application/json"})
+    if r.status_code == 404:
+        return {}
+    r.raise_for_status()
+    return r.json()
+
+
+def _bare(title):
+    """ "Song (feat. X) - Remastered 2011" -> "Song" """
+    return re.sub(r"\s*[(\[][^)\]]*[)\]]", "", title.split(" - ")[0]).strip() or title
+
+
+def _pick_recording(recs, t, searched=False):
+    """The recording that's this song: close in length, the right title (and a confident match, when searched)."""
+    want = (t.get("duration") or 0) / 1000
+    title = _bare(t["title"]).lower()
+    best, best_score = None, -1e9
+    for r in recs or []:
+        if searched and int(r.get("score") or 0) < 85:
+            continue
+        score = 0.0
+        if (r.get("title") or "").lower() == title or _bare(r.get("title") or "").lower() == title:
+            score += 3
+        length = (r.get("length") or 0) / 1000
+        if want and length:
+            gap = abs(length - want)
+            if gap > 12:
+                continue
+            score -= gap / 4
+        if score > best_score:
+            best, best_score = r, score
+    return best.get("id") if best else None
+
+
+ROLE_NAMES = {"mix": "Mixing", "engineer": "Engineering", "recording": "Recording", "audio": "Engineering",
+              "mastering": "Mastering", "programming": "Programming", "arranger": "Arrangement",
+              "instrument arranger": "Arrangement", "vocal arranger": "Vocal arrangement", "performer": "Performance",
+              "remixer": "Remix", "conductor": "Conductor", "chorus master": "Chorus master"}
+
+
+def credits(tid):
+    """Who made a song. Performers, album, label and copyrights come from Spotify; writers, producers and the rest
+    from MusicBrainz, the open music encyclopedia (Spotify's own credits aren't open to apps like this one)."""
+    if tid in _credits:
+        return _credits[tid]
+    j = safe(lambda: get(f"tracks/{tid}")) or {}
+    t = track(j)
+    if not t:
+        return None
+    al = j.get("album") or {}
+    out = {"performers": [a["name"] for a in t["artists"] if a["name"]], "writers": [], "producers": [], "more": [],
+           "album": al.get("name") or "", "released": al.get("release_date") or "", "label": "", "copyrights": [],
+           "musicbrainz": ""}
+    if al.get("id"):
+        a = safe(lambda: get(f"albums/{al['id']}")) or {}
+        out["label"] = a.get("label") or ""
+        out["copyrights"] = [c["text"] for c in a.get("copyrights") or [] if c.get("text")][:2]
+    try:
+        rid = None
+        isrc = (j.get("external_ids") or {}).get("isrc") or ""
+        if isrc:
+            rid = _pick_recording(_mb(f"isrc/{isrc}").get("recordings"), t)
+        if not rid:
+            q = f'recording:"{_bare(t["title"]).replace(chr(92), "").replace(chr(34), "")}" AND artist:"{t["artist"].replace(chr(34), "")}"'
+            rid = _pick_recording(_mb("recording", query=q, limit=10).get("recordings"), t, searched=True)
+        if rid:
+            rec = _mb(f"recording/{rid}", inc="artist-credits+artist-rels+work-rels+work-level-rels")
+            _roles(rec, out)
+            out["musicbrainz"] = f"https://musicbrainz.org/recording/{rid}"
+    except Exception as e:
+        print(f"[credits: MusicBrainz didn't answer ({e})]")
+        return out                                     # not kept, so the next look can try again
+    if len(_credits) > 200:
+        _credits.clear()
+    _credits[tid] = out
+    return out
+
+
+def _roles(rec, out):
+    roles = {}
+
+    def add(role, name):
+        if name and name not in roles.setdefault(role, []):
+            roles[role].append(name)
+
+    for rel in rec.get("relations") or []:
+        kind = rel.get("type") or ""
+        attrs = [a for a in rel.get("attributes") or [] if isinstance(a, str)]
+        if rel.get("target-type") == "artist":
+            name = (rel.get("artist") or {}).get("name")
+            if kind == "producer":
+                add("Producer", name)
+            elif kind == "vocal":
+                add((attrs[0] if attrs else "vocals").capitalize(), name)
+            elif kind == "instrument":
+                add((attrs[0] if attrs else "instruments").capitalize(), name)
+            elif kind in ROLE_NAMES:
+                add(ROLE_NAMES[kind], name)
+        elif rel.get("target-type") == "work":
+            for wr in (rel.get("work") or {}).get("relations") or []:
+                if wr.get("target-type") == "artist" and wr.get("type") in ("composer", "lyricist", "writer", "librettist"):
+                    add("Writer", (wr.get("artist") or {}).get("name"))
+    out["writers"] = roles.pop("Writer", [])
+    out["producers"] = roles.pop("Producer", [])
+    out["more"] = [{"role": r, "names": n} for r, n in roles.items()][:10]
