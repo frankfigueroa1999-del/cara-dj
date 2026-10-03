@@ -8,6 +8,7 @@ profile so it never touches your normal browsing. The page gets Spotify tokens f
 on 127.0.0.1 guarded by a random key, says when it's ready, and closes itself if the app goes away. Windows also ends
 it with the app (a job object), even if the app crashes.
 """
+import base64
 import ctypes
 import hmac
 import http.server
@@ -15,11 +16,14 @@ import json
 import os
 import secrets
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 
 NAME = "Non Stop Pop DJ"          # the speaker's name in Spotify's device list
 
@@ -185,6 +189,74 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return self._send(404, {"error": "unknown"})
 
 
+# ---------------------------------------------------------------- DevTools (the browser's own remote control)
+def _devtools_call(ws_url, method, params, timeout=8.0):
+    """One DevTools command over a websocket (just enough of the protocol for that), returning its result."""
+    u = urllib.parse.urlparse(ws_url)
+    sock = socket.create_connection((u.hostname, u.port), timeout=timeout)
+    try:
+        key = base64.b64encode(os.urandom(16)).decode()
+        sock.sendall((f"GET {u.path} HTTP/1.1\r\nHost: {u.hostname}:{u.port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("DevTools closed the connection")
+            buf += chunk
+        head, buf = buf.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise ConnectionError(head.split(b"\r\n", 1)[0].decode(errors="replace"))
+        msg = json.dumps({"id": 1, "method": method, "params": params}).encode()
+        frame = bytearray([0x81])
+        n = len(msg)
+        if n < 126:
+            frame.append(0x80 | n)
+        elif n < 65536:
+            frame += bytes([0x80 | 126]) + struct.pack(">H", n)
+        else:
+            frame += bytes([0x80 | 127]) + struct.pack(">Q", n)
+        mask = os.urandom(4)
+        frame += mask + bytes(b ^ mask[i % 4] for i, b in enumerate(msg))
+        sock.sendall(bytes(frame))
+
+        def take(k):
+            nonlocal buf
+            while len(buf) < k:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise ConnectionError("DevTools closed the connection")
+                buf += chunk
+            out, buf = buf[:k], buf[k:]
+            return out
+
+        data = b""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            b1, b2 = take(2)
+            size = b2 & 0x7F
+            if size == 126:
+                size = struct.unpack(">H", take(2))[0]
+            elif size == 127:
+                size = struct.unpack(">Q", take(8))[0]
+            if b2 & 0x80:
+                take(4)
+            payload = take(size)
+            if b1 & 0x0F == 8:
+                break
+            data += payload
+            if b1 & 0x80:
+                reply = json.loads(data or b"{}")
+                data = b""
+                if reply.get("id") == 1:
+                    if "error" in reply:
+                        raise RuntimeError(reply["error"].get("message", "DevTools error"))
+                    return reply.get("result") or {}
+        raise TimeoutError("DevTools didn't answer")
+    finally:
+        sock.close()
+
+
 class Player:
     def __init__(self, app_dir, page, token_fn, on_change=None):
         self.profile = os.path.join(app_dir, "player-browser")
@@ -205,11 +277,18 @@ class Player:
         self.started = 0.0
         self.retries = []
         self.lock = threading.Lock()
+        self.unlocked = False          # the page has had its "click" (browsers want one before audio plays)
+        self.diag = {}
 
     # ------------------------------------------------------------ what the app sees
     def info(self):
         return {"status": self.status, "problem": self.problem, "browser": self.browser or "", "ready": self.status == "ready",
-                "deviceId": self.device_id, "name": NAME}
+                "deviceId": self.device_id, "name": NAME, "unlocked": self.unlocked, "diag": self.diag}
+
+    def no_sound(self, detail):
+        """The sound check heard nothing while Spotify says this player is playing."""
+        print(f"[player: no sound from the built-in player ({detail}); checks: {self.diag}]")
+        self._set("error", "Spotify says it's playing in the app, but no sound came out. Try again, or use the Spotify app.")
 
     def _set(self, status, problem=""):
         changed = (status, problem) != (self.status, self.problem)
@@ -232,12 +311,16 @@ class Player:
             self._serve()
             os.makedirs(self.profile, exist_ok=True)
             _seed_widevine(self.profile, name)
+            try:
+                os.remove(os.path.join(self.profile, "DevToolsActivePort"))     # a stale one would point at nothing
+            except OSError:
+                pass
             args = [path, f"--user-data-dir={self.profile}", f"--app=http://127.0.0.1:{self.port}/player?k={self.key}",
                     "--window-size=420,280", "--window-position=-32000,-32000", "--no-first-run", "--no-default-browser-check",
                     "--disable-sync", "--no-service-autorun", "--disable-extensions", "--autoplay-policy=no-user-gesture-required",
                     "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
                     "--disable-backgrounding-occluded-windows", "--hide-crash-restore-bubble", "--disable-session-crashed-bubble",
-                    "--component-updater=fast-update",
+                    "--component-updater=fast-update", "--remote-debugging-port=0",
                     "--disable-features=CalculateNativeWinOcclusion,Translate,msEdgeSidebarV2,msImplicitSignin,msEdgeOnRampFRE"]
             try:
                 self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -246,6 +329,7 @@ class Player:
             self.job = _tie_to_app(self.proc)
             self.started = self.seen = time.time()
             self.device_id = None
+            self.unlocked = False
             self._set("starting")
             print(f"[player: starting the built-in player in a hidden {name} window]")
 
@@ -259,6 +343,55 @@ class Player:
             threading.Thread(target=self._watch, daemon=True).start()
         return f"http://127.0.0.1:{self.port}/player?k={self.key}"
 
+    def _targets(self):
+        port = None
+        for _ in range(30):
+            try:
+                with open(os.path.join(self.profile, "DevToolsActivePort"), encoding="utf-8") as f:
+                    port = int(f.readline().strip())
+                break
+            except (OSError, ValueError):
+                time.sleep(0.3)
+        if not port:
+            raise RuntimeError("the browser's DevTools port never showed up")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as r:
+            return json.loads(r.read())
+
+    def devtools(self, expression, gesture=True, frame=None):
+        """Runs JavaScript in the player page (or, with frame=, in Spotify's frame inside it) as if you'd clicked there."""
+        targets = self._targets()
+        if frame:
+            target = next((t for t in targets if t.get("type") == "iframe" and frame in (t.get("url") or "")), None)
+        else:
+            target = next((t for t in targets if t.get("type") == "page" and f"127.0.0.1:{self.port}/player" in (t.get("url") or "")), None)
+        if not target:
+            raise RuntimeError(f"couldn't find the {'Spotify frame' if frame else 'player page'}")
+        res = _devtools_call(target["webSocketDebuggerUrl"], "Runtime.evaluate",
+                             {"expression": expression, "userGesture": gesture, "awaitPromise": True, "returnByValue": True})
+        if res.get("exceptionDetails"):
+            d = res["exceptionDetails"]
+            raise RuntimeError(((d.get("exception") or {}).get("description") or d.get("text") or "script error").split("\n")[0])
+        return (res.get("result") or {}).get("value")
+
+    def unlock(self, why):
+        """Give the page its click, nudge playback (pause and resume), and click inside Spotify's own frame too."""
+        try:
+            got = self.devtools("window.__unlock ? window.__unlock() : 'the player is still loading'")
+            self.unlocked = True
+        except Exception as e:
+            print(f"[player: couldn't unlock the sound ({why}): {e}]")
+            return False
+        media = ""
+        try:
+            media = self.devtools("(() => { const ms = [...document.querySelectorAll('audio,video')];"
+                                  " ms.forEach(m => { if (m.paused && m.readyState > 0) m.play().catch(() => {}); });"
+                                  " return ms.map(m => (m.paused ? 'paused' : 'playing') + (m.muted ? ', muted' : '')).join('; ') || 'no media yet'; })()",
+                                  frame="scdn.co")
+        except Exception as e:
+            media = f"not reachable ({e})"
+        print(f"[player: sound unlocked ({why}): {got}; Spotify's frame: {media}]")
+        return True
+
     def stop(self):
         with self.lock:
             self.wanted = False
@@ -271,6 +404,18 @@ class Player:
                 proc.terminate()
             except Exception:
                 pass
+
+    def retry(self):
+        """Try again button: a fresh start (new page, new click), forgetting earlier failures."""
+        self.retries, self.problem, self.wanted = [], "", True
+        proc, self.proc = self.proc, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(5)
+            except Exception:
+                pass
+        self.start()
 
     def restart(self, why, wait=4.0):
         now = time.time()
@@ -311,6 +456,13 @@ class Player:
             self.retries = []
             print("[player: the built-in player is ready]")
             self._set("ready")
+            threading.Thread(target=self.unlock, args=("ready",), daemon=True).start()
+        elif kind == "diag":
+            self.diag = {k: str(v)[:80] for k, v in e.items() if k != "type"}
+            print("[player: " + ", ".join(f"{k}: {v}" for k, v in self.diag.items()) + "]")
+        elif kind == "autoplay":
+            print("[player: the browser held back the sound until a click; unlocking]")
+            threading.Thread(target=self.unlock, args=("autoplay",), daemon=True).start()
         elif kind == "not_ready":
             self.device_id = None
             self._set("starting")

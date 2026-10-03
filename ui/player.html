@@ -48,9 +48,37 @@
     player.addListener('authentication_error', ({ message }) => { say(message); post('error', { kind: 'auth', message }); });
     player.addListener('account_error', ({ message }) => { say(message); post('error', { kind: 'account', message }); });
     player.addListener('playback_error', ({ message }) => { post('error', { kind: 'playback', message }); });
-    player.addListener('autoplay_failed', () => { post('log', { message: 'the browser blocked autoplay' }); });
+    player.addListener('autoplay_failed', () => { post('autoplay'); });
     player.connect().then(ok => { if (!ok) post('log', { message: 'the player could not connect to Spotify' }); });
   };
+
+  // The app calls this as if you'd clicked in this page (browsers only let sound start after a click), then nudges
+  // playback so the sound really starts.
+  window.__unlock = async () => {
+    if (!player) return 'no player yet';
+    try { await player.activateElement(); } catch (e) { /* older SDKs don't need it */ }
+    const st = await player.getCurrentState().catch(() => null);
+    if (st && !st.paused) {
+      await player.pause().catch(() => {});
+      await new Promise(r => setTimeout(r, 300));
+      await player.resume().catch(() => {});
+      return 'playing again';
+    }
+    return st ? 'ready (paused)' : 'ready';
+  };
+
+  // what this browser can do, for the app's Activity log
+  (async () => {
+    const d = {};
+    try {
+      await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{ initDataTypes: ['cenc'],
+        audioCapabilities: [{ contentType: 'audio/mp4;codecs="mp4a.40.2"' }] }]);
+      d.widevine = 'ok';
+    } catch (e) { d.widevine = `missing (${e.name})`; }
+    try { const ac = new AudioContext(); d.sound = ac.state; ac.close(); } catch (e) { d.sound = `error (${e.name})`; }
+    d.browser = (navigator.userAgent.match(/Edg\/[\d.]+|Chrome\/[\d.]+/) || ['?'])[0];
+    post('diag', d);
+  })();
 
   // no SDK after a minute (offline, or blocked)? reload and try again
   setTimeout(() => { if (!player) retry("Couldn't reach Spotify."); }, 60000);

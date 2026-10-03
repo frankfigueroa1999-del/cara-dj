@@ -211,6 +211,8 @@ class App:
         self.window = None
         self.poke = threading.Event()
         self.player = pc_player.Player(APP_DIR, os.path.join(HERE, "ui", "player.html"), self.player_token, self.player_changed)
+        self.sound_watch = None         # listening for the built-in player's sound after it starts playing
+        self.sound_heard = False
         threading.Thread(target=self.poll_loop, daemon=True).start()
         if self.cfg["spotify_client_id"] and self.cfg["spotify_client_secret"]:
             if not self.cfg.get("welcomed"):
@@ -375,6 +377,8 @@ class App:
         return self.dj.sp.auth_manager.get_access_token(as_dict=False)
 
     def player_changed(self, status):
+        if status != "ready":
+            self.sound_heard, self.sound_watch = False, None
         if status == "ready" and self.cfg.get("player", "app") == "app":
             threading.Thread(target=self.use_builtin, daemon=True).start()
         self.poke.set()
@@ -389,6 +393,33 @@ class App:
                 pc_spotify.safe(lambda: pc_spotify.put("me/player", payload={"device_ids": [pick["id"]], "play": bool(n.get("playing"))}))
         self.player.stop()
         self.poke.set()
+
+    def check_sound(self, pb):
+        """Spotify says the built-in player is playing: is sound actually coming out? (listens to the speakers)"""
+        p, t = self.player, (pb or {}).get("track") or {}
+        here = p.status == "ready" and p.device_id and ((pb or {}).get("device") or {}).get("id") == p.device_id
+        if self.sound_heard or not (here and pb.get("playing")):
+            self.sound_watch = None
+            return
+        w = self.sound_watch
+        if w is None:
+            w = self.sound_watch = {"since": time.time(), "nudged": False}
+        ear = pc_audio.LISTENER
+        ear.frame()                                  # keeps the listener going while it checks
+        waited = time.time() - w["since"]
+        if not ear.live:
+            if waited > 25:                          # can't listen on this PC: trust it
+                self.sound_heard = True
+            return
+        if ear.vol > 0.03 or ear.bass > 0.1:
+            self.sound_heard, self.sound_watch = True, None
+            print("[player: sound check passed: the music is coming out]")
+        elif waited > 7 and not w["nudged"]:
+            w["nudged"] = True
+            threading.Thread(target=p.unlock, args=("no sound yet",), daemon=True).start()
+        elif waited > 18:
+            self.sound_watch = None
+            p.no_sound(f"silent for {int(waited)} seconds while Spotify said it was playing")
 
     def use_builtin(self, force=False):
         """Point Spotify at the built-in player, unless music is already playing on another device (or when asked)."""
@@ -493,6 +524,10 @@ class App:
                         print(note)
                 continue
             empty_since, last_note, self.hint = None, None, ""
+            try:
+                self.check_sound(pb)
+            except Exception as e:
+                print(f"[player: sound check failed: {e}]")
             b = getattr(self.dj, "brain", None)
             if b is not None:
                 try:
@@ -767,9 +802,7 @@ class Api:
 
     @guard
     def player_retry(self):
-        self._app.player.retries = []
-        self._app.player.problem = ""
-        threading.Thread(target=self._app.player.start, daemon=True).start()
+        threading.Thread(target=self._app.player.retry, daemon=True).start()
         return True
 
     @guard
