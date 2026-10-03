@@ -5,6 +5,9 @@ const ICONS = {
   libOpen: '<path fill-rule="evenodd" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM5 5v14h3V5zm5 0v14h9V5zM13.5 8.2 17.3 12l-3.8 3.8-1.06-1.06L15.18 12l-2.74-2.74z"/>',
   nvClose: '<path fill-rule="evenodd" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM5 5v14h9V5zm11 0v14h3V5zM8.5 8.2 12.3 12l-3.8 3.8-1.06-1.06L10.18 12 7.44 9.26z"/>',
   nvOpen: '<path fill-rule="evenodd" d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zM5 5v14h9V5zm11 0v14h3V5zM10.5 8.2 6.7 12l3.8 3.8 1.06-1.06L8.82 12l2.74-2.74z"/>',
+  pencil: '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>',
+  trash: '<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>',
+  up: '<path d="M12 8l-6 6 1.41 1.41L12 10.83l4.59 4.58L18 14z"/>',
   // Now Playing view, browse, pin, list/sort, collapse and lyrics microphone (Material Design shapes)
   panel: '<path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-4 16H5V5h10v14zm4 0h-2V5h2v14z"/><path d="M8 9.2v5.6c0 .4.44.64.78.42l4.3-2.8a.5.5 0 0 0 0-.84l-4.3-2.8A.5.5 0 0 0 8 9.2z"/>',
   browse: '<path d="M4 4h7v7H4zm2 2v3h3V6zm7-2h7v7h-7zm2 2v3h3V6zM4 13h7v7H4zm2 2v3h3v-3zm11-2h-2v3h-3v2h3v3h2v-3h3v-2h-3z"/>',

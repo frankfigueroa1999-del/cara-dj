@@ -869,6 +869,7 @@ void main() {
           <button class="chip on" data-v="auto" title="Change scenes with the music (A)">Auto</button>
           <button class="round" data-v="prev" title="Previous scene (←)">${ic('back')}</button>
           <button class="round" data-v="next" title="Next scene (→)">${ic('forward')}</button>
+          <div class="vol vis-vol"><button class="round" data-act="mute" data-size="20" title="Mute">${ic('volume')}</button><input type="range" class="vol-range" min="0" max="100" value="60" title="Volume"></div>
           <button class="round" data-v="full" title="Full screen (F)">${ic('fullscreen')}</button>
           <button class="round" data-v="close" title="Close (Esc)">${ic('close')}</button>
         </div>
@@ -907,6 +908,7 @@ void main() {
   function show() {
     if (isOpen) return;
     build();
+    if (typeof syncVolume === 'function' && typeof volNow === 'function') setTimeout(() => syncVolume(volNow()), 0);   // its volume slider starts where the music is
     isOpen = true;
     root.classList.add('open');
     lastNow = performance.now();

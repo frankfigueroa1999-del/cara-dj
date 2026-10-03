@@ -55,6 +55,7 @@
     player.addListener('autoplay_failed', () => { post('autoplay'); });
     player.addListener('player_state_changed', st => {
       const t = st && st.track_window && st.track_window.current_track;
+      media(st, t);
       if (!t || t.uri === lastUri) return;
       lastUri = t.uri;
       const hit = [t.uri, t.linked_from && t.linked_from.uri].find(u => u && skip.has(u));
@@ -62,6 +63,41 @@
     });
     player.connect().then(ok => { if (!ok) post('log', { message: 'the player could not connect to Spotify' }); });
   };
+
+  // Windows' media controls (keyboard media keys, the volume flyout, a tablet's buttons). Chrome hands them to the
+  // top-most frame that plays sound. The music plays inside Spotify's own frame, which only answers play and pause,
+  // so this page plays a loop of silence (which makes it the one Chrome asks) and answers next and previous too.
+  let quiet = null, shown = '';
+  function silence() {
+    const n = 4000, b = new ArrayBuffer(44 + n), v = new DataView(b), w = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, 8000, true); v.setUint32(28, 8000, true); v.setUint16(32, 1, true); v.setUint16(34, 8, true); w(36, 'data'); v.setUint32(40, n, true);
+    for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);
+    const a = new Audio(URL.createObjectURL(new Blob([b], { type: 'audio/wav' })));
+    a.loop = true;
+    return a;
+  }
+  function media(st, t) {
+    const ms = navigator.mediaSession;
+    if (!ms || !player) return;
+    if (!quiet) {
+      quiet = silence();
+      const act = (name, fn) => { try { ms.setActionHandler(name, fn); } catch (e) { /* not on this browser */ } };
+      act('play', () => player.resume()); act('pause', () => player.pause());
+      act('nexttrack', () => player.nextTrack()); act('previoustrack', () => player.previousTrack());
+      act('seekto', d => player.seek(Math.max(0, Math.round((d.seekTime || 0) * 1000))));
+    }
+    const playing = !!(st && t && !st.paused);
+    if (playing && quiet.paused) quiet.play().catch(() => {});
+    if (!playing && !quiet.paused) quiet.pause();
+    ms.playbackState = !st || !t ? 'none' : playing ? 'playing' : 'paused';
+    if (t && t.uri !== shown && window.MediaMetadata) {
+      shown = t.uri;
+      const art = ((t.album && t.album.images) || []).slice().sort((x, y) => (y.width || 0) - (x.width || 0));
+      ms.metadata = new MediaMetadata({ title: t.name || '', artist: (t.artists || []).map(a => a.name).join(', '), album: (t.album && t.album.name) || '',
+        artwork: art.map(i => ({ src: i.url, sizes: i.width ? `${i.width}x${i.height || i.width}` : '640x640', type: 'image/jpeg' })) });
+    }
+  }
 
   // The app calls this as if you'd clicked in this page (browsers only let sound start after a click), then nudges
   // playback so the sound really starts.

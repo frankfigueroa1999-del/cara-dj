@@ -1370,6 +1370,45 @@ class Api:
         return pc_spotify.add_to_playlist(pid, [uri])
 
     @guard
+    def all_tracks(self, kind, xid=""):
+        return pc_spotify.all_tracks(kind, xid)
+
+    @guard
+    def queue_many(self, kind, xid):
+        """Adds a whole album, playlist or mix to the queue (its first 100 songs). How many went in."""
+        n = 0
+        for t in pc_spotify.tracks_of(kind, xid)[:100]:
+            if t.get("uri") and self._app.queue_add(t["uri"]):
+                n += 1
+        return n
+
+    @guard
+    def add_many_to_playlist(self, pid, kind, xid):
+        """Adds every song of an album, playlist or mix to one of your playlists. How many went in."""
+        uris = [t["uri"] for t in pc_spotify.tracks_of(kind, xid) if t.get("uri") and not t.get("local")]
+        for i in range(0, len(uris), 100):
+            if not pc_spotify.add_to_playlist(pid, uris[i:i + 100]):
+                return i
+        return len(uris)
+
+    @guard
+    def save_mix(self, mid):
+        """One of the app's mixes, saved as a playlist of your own."""
+        m = pc_spotify.mix(mid)
+        if not m or not m.get("tracks"):
+            return None
+        p = pc_spotify.create_playlist(m["name"])
+        if not p:
+            return None
+        uris = [t["uri"] for t in m["tracks"]]
+        pc_spotify.add_to_playlist(p["id"], uris[:100])
+        return p
+
+    @guard
+    def edit_playlist(self, pid, name):
+        return pc_spotify.edit_playlist(pid, (name or "").strip()[:100])
+
+    @guard
     def lyrics(self, title, artist, album="", duration=0):
         return pc_spotify.lyrics(title, artist, album, duration)
 
@@ -1515,6 +1554,25 @@ def dark_titlebar():
     set_titlebar()
 
 
+def wait_for_old_window(folder, limit=5.0):
+    """Opened again right after closing? The old window's WebView2 may still be shutting down, and a new window would
+    join it (Task Manager then lists it apart from the app). Its lock file is held until it's gone: wait for that."""
+    lock = os.path.join(folder, "EBWebView", "lockfile")
+    end = time.time() + limit
+    while time.time() < end:
+        try:
+            fd = os.open(lock, os.O_RDWR)
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(0.2)                         # still held: the old one is finishing
+            continue
+        except OSError:
+            return
+        os.close(fd)
+        return
+
+
 _MUTEX = []
 
 
@@ -1645,6 +1703,7 @@ def main():
         return
     app = App()
     api = Api(app)
+    wait_for_old_window(os.path.join(APP_DIR, "webview"))
     bg = app.cfg.get("ui_bg") if app.cfg.get("ui_bg") in TITLE_COLOURS else "song"
     TITLEBAR["mode"] = bg
     window = webview.create_window(

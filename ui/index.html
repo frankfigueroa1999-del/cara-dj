@@ -91,7 +91,7 @@
     <button class="icon-btn" id="bar-lyrics" title="Lyrics"><i data-icon="lyricsmic" data-size="19"></i></button>
     <button class="icon-btn" id="bar-queue" title="Queue"><i data-icon="queue" data-size="20"></i></button>
     <button class="icon-btn" id="bar-dev" title="Connect to a device"><i data-icon="speaker" data-size="20"></i></button>
-    <div class="vol"><button class="icon-btn" id="bar-mute" title="Mute"></button><input type="range" id="bar-vol" min="0" max="100" value="60" title="Volume"></div>
+    <div class="vol"><button class="icon-btn" id="bar-mute" data-act="mute" title="Mute"></button><input type="range" id="bar-vol" class="vol-range" min="0" max="100" value="60" title="Volume"></div>
     <button class="icon-btn" id="bar-vis" title="Visualizer (V)"><i data-icon="sparkles" data-size="19"></i></button>
     <button class="icon-btn" id="bar-expand" title="Full screen"><i data-icon="fullscreen" data-size="19"></i></button>
   </div>
@@ -126,7 +126,8 @@
       <button class="icon-btn" id="np-next" title="Next"><i data-icon="next" data-size="34"></i></button>
       <button class="icon-btn" id="np-repeat" title="Repeat"></button>
     </div>
-    <div class="np-foot"><button class="np-device" id="np-device"></button></div>
+    <div class="np-foot"><button class="np-device" id="np-device"></button>
+      <div class="vol np-vol"><button class="icon-btn" data-act="mute" data-size="22" title="Mute"></button><input type="range" class="vol-range" min="0" max="100" value="60" title="Volume"></div></div>
   </div>
   <div class="col right">
     <div class="tabs"><button class="chip" data-tab="lyrics">Lyrics</button><button class="chip" data-tab="queue">Up Next</button><button class="chip" data-tab="about">About</button></div>

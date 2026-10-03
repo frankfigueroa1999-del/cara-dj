@@ -439,3 +439,22 @@ body.light .big-card { background: rgba(255, 255, 255, .55); box-shadow: 0 1px 2
 body.light .big-card:hover { background: rgba(255, 255, 255, .9); }
 
 @media (max-width: 1239px) { #bar-vis { display: none !important; } .vol { width: 96px; } }
+
+/* ---------------------------------------------------------------- volume everywhere, playlist search and sort, menus with a search box */
+.np-foot { width: min(46vh, 520px, 42vw); justify-content: space-between; }
+.np-vol { width: 190px; }
+.np-vol .icon-btn { color: rgba(255, 255, 255, .85); }
+#vis .vis-vol { width: 190px; height: 40px; margin: 0; padding-right: 12px; border-radius: 20px; background: rgba(0, 0, 0, .45); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+#vis .vis-vol .round { background: none; backdrop-filter: none; }
+.page-more { width: 46px; height: 46px; }
+.list-tools { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.list-find { display: flex; align-items: center; height: 36px; border-radius: 8px; transition: background .2s; }
+.list-find input { width: 0; padding: 0; border: 0; outline: 0; background: none; color: var(--fg); font-size: 14px; transition: width .22s ease, padding .22s ease; }
+.list-find.open { background: rgba(var(--fg-rgb), .1); }
+.list-find.open input { width: 190px; padding: 0 10px 0 0; }
+.list-find .icon-btn { width: 36px; height: 36px; }
+.list-sort { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 8px 0 12px; border-radius: 8px; color: var(--text2); font-size: 14px; font-weight: 600; white-space: nowrap; }
+.list-sort:hover { color: var(--fg); }
+.menu-search { position: sticky; top: -6px; z-index: 1; display: flex; align-items: center; gap: 8px; height: 38px; margin: -6px -6px 6px; padding: 0 12px; border-radius: 14px 14px 0 0; background: #2b2830; color: var(--text2); box-shadow: 0 1px 0 rgba(var(--fg-rgb), .08); }
+.menu-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: none; color: var(--fg); font-size: 14px; }
+body.light .menu-search { background: #fafafc; }

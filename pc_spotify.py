@@ -142,6 +142,19 @@ def device(d):
             "volume": d.get("volume_percent")}
 
 
+def _with_added(rows, key="track"):
+    """Songs from a playlist's (or Liked Songs') rows, each with when it was added (for sorting by date added)."""
+    out = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        t = track(r.get("item") or r.get(key))
+        if t:
+            t["added"] = r.get("added_at") or ""
+            out.append(t)
+    return out
+
+
 def _rows(items, key):
     out = []
     for r in items or []:
@@ -172,7 +185,7 @@ def my_playlists(offset=0):
 
 def liked(offset=0):
     j = safe(lambda: get("me/tracks", limit=50, offset=offset)) or {}
-    items = [t for t in (track(x) for x in _rows(j.get("items"), "track")) if t]
+    items = _with_added(j.get("items"))
     return {"items": items, "total": j.get("total") or len(items)}
 
 
@@ -433,7 +446,7 @@ def playlist_page(pid):
         return None
     page = j.get("items") if isinstance(j.get("items"), dict) else j.get("tracks")
     rows = (page or {}).get("items")
-    tracks = [t for t in (track(x) for x in _rows(rows, "track")) if t]
+    tracks = _with_added(rows)
     total = (page or {}).get("total") or p["total"]
     saved = contains([p["uri"]])
     return {"playlist": p, "tracks": tracks, "total": total, "canList": rows is not None, "rows": len(rows or []),
@@ -443,7 +456,55 @@ def playlist_page(pid):
 def playlist_more(pid, offset):
     j = safe(lambda: get(f"playlists/{pid}/items", limit=50, offset=offset)) or {}
     rows = j.get("items") or []
-    return {"tracks": [t for t in (track(x) for x in _rows(rows, "track")) if t], "rows": len(rows)}
+    return {"tracks": _with_added(rows), "rows": len(rows)}
+
+
+def all_tracks(kind, xid=""):
+    """Every song in a playlist you made (or in Liked Songs), in order, fetched a few pages at a time."""
+    if kind == "liked":
+        first = safe(lambda: get("me/tracks", limit=50, offset=0)) or {}
+        path = "me/tracks"
+    else:
+        first = safe(lambda: get(f"playlists/{xid}/items", limit=50, offset=0)) or {}
+        path = f"playlists/{xid}/items"
+    total = min(first.get("total") or 0, 5000)
+    pages = {0: _with_added(first.get("items"))}
+    offsets = list(range(50, total, 50))
+    lock = threading.Lock()
+
+    def fetch():
+        while True:
+            with lock:
+                if not offsets:
+                    return
+                off = offsets.pop(0)
+            j = safe(lambda: get(path, limit=50, offset=off)) or {}
+            pages[off] = _with_added(j.get("items"))
+
+    workers = [threading.Thread(target=fetch, daemon=True) for _ in range(min(6, len(offsets)))]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(60)
+    return [t for off in sorted(pages) for t in pages[off]]
+
+
+def tracks_of(kind, xid):
+    """The songs in an album, a playlist you made, Liked Songs or one of the app's mixes."""
+    if kind == "album":
+        return (album_page(xid) or {}).get("tracks") or []
+    if kind in ("playlist", "liked"):
+        return all_tracks(kind, xid)
+    if kind == "mix":
+        return (mix(xid) or {}).get("tracks") or []
+    return []
+
+
+def edit_playlist(pid, name):
+    ok = safe(lambda: put(f"playlists/{pid}", payload={"name": name}) or True, False)
+    if ok:
+        forget_home()
+    return bool(ok)
 
 
 def liked_more(offset):
@@ -1361,6 +1422,12 @@ def mix(mid):
     if not m:
         home_feed()
         m = _mixdefs.get(mid)
+    if not m and mid.startswith("station:"):          # any artist's radio (from an artist's ••• menu)
+        a = artist(safe(lambda: get(f"artists/{mid[8:]}")))
+        if a:
+            _fill_genres([a])
+            m = _mixdef(mid, "station", f"{a['name']} Radio", [a], HUES[len(a['name']) % len(HUES)], label="Radio",
+                        **{"with": [], "withArt": [], "artist": {"id": a["id"], "name": a["name"], "image": _pic(a)}})
     if not m:
         return None
     h = home()
