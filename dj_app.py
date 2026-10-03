@@ -984,6 +984,31 @@ class Api:
         return True
 
     @guard
+    def now_extras(self, t):
+        return pc_spotify.now_extras(t)
+
+    @guard
+    def play_named(self, title, artist):
+        """A song by name (a related music video): the best match on Spotify plays."""
+        found = []
+        for q in (f'track:"{title}" artist:"{artist}"', f"{title} {artist}"):
+            j = pc_spotify.safe(lambda: pc_spotify.get("search", q=q, type="track", limit=5)) or {}
+            found = [t for t in (pc_spotify.track(x) for x in (j.get("tracks") or {}).get("items") or []) if t and not t["local"]]
+            if found:
+                break
+        if not found:
+            return "Couldn't find that song on Spotify."
+        return self._app.play(None, None, [found[0]["uri"]], None, None)
+
+    @guard
+    def quit(self):
+        """File > Exit."""
+        w = self._app.window
+        if w is not None:
+            threading.Timer(0.1, w.destroy).start()
+        return True
+
+    @guard
     def song_radio(self, tid):
         return pc_spotify.song_radio(tid)
 
@@ -1267,6 +1292,10 @@ def dark_titlebar():
         value = ctypes.c_int(1)
         for attr in (20, 19):                      # Windows 10 20H1+ and older builds
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+        # Windows 11: the title bar takes the app's own background, so it reads as part of the window
+        for attr, rgb in ((35, 0x0B080A), (34, 0x0B080A)):    # caption and border colour (0xBBGGRR)
+            color = ctypes.c_int(rgb)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(color), ctypes.sizeof(color))
     except Exception:
         pass
 
@@ -1326,7 +1355,7 @@ def self_test(path):
         if sys.platform == "win32":
             import clr  # noqa: F401  (pythonnet: the window's bridge to Windows)
             from webview.platforms import winforms  # noqa: F401  (the Edge WebView2 window and its DLLs)
-        for name in ("index.html", "style.css", "app.js", "icons.js", "vis.js", "player.html", "vendor/butterchurn.min.js",
+        for name in ("index.html", "style.css", "glass.css", "app.js", "icons.js", "vis.js", "player.html", "vendor/butterchurn.min.js",
                      "vendor/milk-utils.min.js", "vendor/hlslparser.js", "presets/pack.json", "presets/images.json"):
             if not os.path.exists(os.path.join(HERE, "ui", name)):
                 raise RuntimeError(f"the screen file ui/{name} is missing")
@@ -1374,7 +1403,7 @@ def main():
     api = Api(app)
     window = webview.create_window(
         APP_NAME, url=os.path.join(HERE, "ui", "index.html"), js_api=api,
-        width=1360, height=880, min_size=(1040, 680), background_color="#09090D", text_select=False,
+        width=1440, height=900, min_size=(1080, 680), background_color="#0A080B", text_select=False,
     )
     app.window = window
     window.events.closed += app.on_close

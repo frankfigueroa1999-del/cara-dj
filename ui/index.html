@@ -5,52 +5,75 @@
 <title>Non Stop Pop DJ</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="glass.css">
 </head>
 <body>
 <div id="ambient"><div class="layer"></div><div class="layer"></div></div>
 
-<aside id="sidebar">
-  <div class="brand" data-act="tab" data-tab="home" title="Home">
-    <div class="tile"><span id="brand-bars" class="bars"></span></div>
-    <div class="ell"><b>Non Stop Pop</b><small><span id="brand-dot" class="dot"></span><span id="brand-status" class="ell">Off air</span></small></div>
+<header id="topbar">
+  <div class="tb-side">
+    <button class="tb-dots" id="tb-menu" title="Menu"><i data-icon="more" data-size="22"></i><span class="onair" id="tb-onair" hidden></span></button>
+    <button class="tb-nav" id="nav-back" data-act="back" title="Go back"><i data-icon="back" data-size="22"></i></button>
+    <button class="tb-nav" id="nav-fwd" data-act="forward" title="Go forward"><i data-icon="forward" data-size="22"></i></button>
   </div>
-  <nav class="nav">
-    <button data-act="tab" data-tab="home"><i data-icon="home" data-size="22"></i>Home</button>
-    <button data-act="tab" data-tab="cara"><i data-icon="radio" data-size="22"></i>Cara</button>
-    <button data-act="tab" data-tab="library"><i data-icon="library" data-size="22"></i>Your Library</button>
-    <button data-act="tab" data-tab="search"><i data-icon="search" data-size="22"></i>Search</button>
-  </nav>
-  <div class="side-label"><span class="caps">Playlists</span><button data-act="new-playlist" title="New playlist"><i data-icon="plus" data-size="18"></i></button></div>
-  <div class="side-list scroll" id="side-list"></div>
-  <div class="account">
-    <button class="me" data-act="settings" title="Settings"><div class="avatar" id="me-avatar"></div><span class="ell" id="me-name">Settings</span></button>
-    <button class="icon-btn" data-act="settings" title="Settings"><i data-icon="settings" data-size="20"></i></button>
+  <div class="tb-center">
+    <button class="tb-home lg" id="tb-home" data-act="home" title="Home"><i data-icon="home" data-size="24"></i></button>
+    <div class="tb-search lg">
+      <i data-icon="search" data-size="22"></i>
+      <input id="search-input" placeholder="What do you want to play?" spellcheck="false" autocomplete="off">
+      <button class="tb-clear" id="tb-clear" data-act="search-clear" title="Clear" hidden><i data-icon="close" data-size="18"></i></button>
+      <span class="tb-sep"></span>
+      <button class="tb-browse" data-act="browse" title="Browse"><i data-icon="browse" data-size="22"></i></button>
+    </div>
   </div>
-</aside>
+  <div class="tb-side right">
+    <button class="tb-me" id="tb-me" title="Account"><span class="avatar" id="me-avatar"></span></button>
+  </div>
+</header>
 
-<main id="main">
-  <div id="topbar">
-    <button class="round" id="nav-back" data-act="back" title="Back (Alt+Left)"><i data-icon="back" data-size="22"></i></button>
-    <button class="round" id="nav-fwd" data-act="forward" title="Forward (Alt+Right)"><i data-icon="forward" data-size="22"></i></button>
-    <span class="title"></span>
-    <span class="spacer"></span>
-  </div>
-  <div id="scroller" class="scroll"><div id="page"></div></div>
+<main id="shell">
+  <aside id="library" class="pane lg">
+    <div class="lib-head">
+      <button class="lib-title" data-act="lib-collapse" title="Collapse Your Library"><i data-icon="library" data-size="24"></i><span>Your Library</span></button>
+      <button class="lib-create" data-act="new-playlist" title="Create a playlist"><i data-icon="plus" data-size="18"></i><span>Create</span></button>
+    </div>
+    <div class="lib-chips" id="lib-chips"></div>
+    <div class="lib-tools">
+      <button class="icon-btn" data-act="lib-find" title="Search in Your Library"><i data-icon="search" data-size="18"></i></button>
+      <input id="lib-filter" placeholder="Search in Your Library" spellcheck="false" autocomplete="off" hidden>
+      <button class="lib-sort" data-act="lib-sort" id="lib-sort"><span>Recents</span><i data-icon="list" data-size="18"></i></button>
+    </div>
+    <div class="lib-list scroll" id="lib-list"></div>
+  </aside>
+  <div class="drag" id="drag-l" title="Drag to resize, double-click to collapse"></div>
+  <section id="main" class="pane lg">
+    <div id="main-head"><span class="title"></span></div>
+    <div id="scroller" class="scroll"><div id="page"></div></div>
+  </section>
+  <div class="drag" id="drag-r" title="Drag to resize"></div>
+  <aside id="nowview" class="pane lg">
+    <header class="nv-head">
+      <b class="ell" id="nv-ctx">Now playing</b>
+      <button class="icon-btn" id="nv-more" title="More options"><i data-icon="more" data-size="20"></i></button>
+      <button class="icon-btn" id="nv-close" title="Close"><i data-icon="close" data-size="20"></i></button>
+    </header>
+    <div class="nv-body scroll" id="nv-body"></div>
+  </aside>
 </main>
 
-<footer id="bar">
+<footer id="bar" class="lg">
   <div class="now">
-    <div class="art" id="bar-art" title="Open the big player"></div>
+    <div class="art" id="bar-art" title="Now Playing view"></div>
     <div class="names"><b id="bar-title" class="ell">Not connected</b><small id="bar-artist" class="ell"></small></div>
-    <button class="icon-btn" id="bar-like" title="Add to Liked Songs" hidden></button>
+    <button class="icon-btn" id="bar-like" title="Save to your Liked Songs" hidden></button>
   </div>
   <div class="transport">
     <div class="buttons">
-      <button class="icon-btn" id="bar-shuffle" title="Shuffle"><i data-icon="shuffle" data-size="20"></i></button>
+      <button class="icon-btn" id="bar-shuffle" title="Shuffle (Ctrl+S)"><i data-icon="shuffle" data-size="20"></i></button>
       <button class="icon-btn" id="bar-prev" title="Previous (Ctrl+Left)"><i data-icon="prev" data-size="22"></i></button>
       <button class="play-btn" id="bar-play" title="Play / Pause (Space)"></button>
       <button class="icon-btn" id="bar-next" title="Next (Ctrl+Right)"><i data-icon="next" data-size="22"></i></button>
-      <button class="icon-btn" id="bar-repeat" title="Repeat"></button>
+      <button class="icon-btn" id="bar-repeat" title="Repeat (Ctrl+R)"></button>
     </div>
     <div class="progress">
       <span id="bar-pos" class="num">0:00</span>
@@ -59,16 +82,16 @@
     </div>
   </div>
   <div class="side">
-    <button class="dj-btn" id="dj-btn"></button>
-    <button class="icon-btn" id="bar-vis" title="Visualizer (V)"><i data-icon="sparkles" data-size="20"></i></button>
-    <button class="icon-btn" id="bar-lyrics" title="Lyrics"><i data-icon="quote" data-size="20"></i></button>
-    <button class="icon-btn" id="bar-queue" title="Up next"><i data-icon="queue" data-size="20"></i></button>
-    <button class="icon-btn" id="bar-dev" title="Devices"><i data-icon="speaker" data-size="20"></i></button>
-    <button class="icon-btn" id="bar-sleep" title="Sleep timer"><i data-icon="moon" data-size="19"></i></button>
-    <div class="vol"><button class="icon-btn" id="bar-mute" title="Mute"></button><input type="range" id="bar-vol" min="0" max="100" value="60" title="Spotify volume"></div>
-    <button class="icon-btn" id="bar-expand" title="Big player"><i data-icon="expand" data-size="18"></i></button>
+    <button class="icon-btn" id="bar-nv" title="Now Playing view"><i data-icon="panel" data-size="19"></i></button>
+    <button class="icon-btn" id="bar-lyrics" title="Lyrics"><i data-icon="lyricsmic" data-size="19"></i></button>
+    <button class="icon-btn" id="bar-queue" title="Queue"><i data-icon="queue" data-size="20"></i></button>
+    <button class="icon-btn" id="bar-dev" title="Connect to a device"><i data-icon="speaker" data-size="20"></i></button>
+    <div class="vol"><button class="icon-btn" id="bar-mute" title="Mute"></button><input type="range" id="bar-vol" min="0" max="100" value="60" title="Volume"></div>
+    <button class="icon-btn" id="bar-vis" title="Visualizer (V)"><i data-icon="sparkles" data-size="19"></i></button>
+    <button class="icon-btn" id="bar-expand" title="Full screen"><i data-icon="fullscreen" data-size="19"></i></button>
   </div>
 </footer>
+<button id="playing-on" hidden></button>
 
 <div id="np">
   <div class="np-bg" id="np-bg"></div>
@@ -85,7 +108,7 @@
     <div class="cover-wrap"><div id="np-art"></div><div class="caption" id="np-caption"></div></div>
     <div class="song">
       <div class="ell"><h1 id="np-title" class="ell">Nothing playing</h1><p id="np-artist" class="ell"></p></div>
-      <div class="btns"><button class="icon-btn" id="np-like" title="Like"></button></div>
+      <div class="btns"><button class="icon-btn" id="np-like" title="Save to your Liked Songs"></button></div>
     </div>
     <div class="np-progress">
       <div class="track-bar" id="np-seek"><div class="rail"><div class="fill" id="np-fill"></div></div><div class="knob" id="np-knob"></div></div>
@@ -98,7 +121,7 @@
       <button class="icon-btn" id="np-next" title="Next"><i data-icon="next" data-size="34"></i></button>
       <button class="icon-btn" id="np-repeat" title="Repeat"></button>
     </div>
-    <div class="np-foot"><button class="np-device" id="np-device"></button><button class="icon-btn" id="np-dj" title="Go live"><i data-icon="radio" data-size="24"></i></button></div>
+    <div class="np-foot"><button class="np-device" id="np-device"></button></div>
   </div>
   <div class="col right">
     <div class="tabs"><button class="chip" data-tab="lyrics">Lyrics</button><button class="chip" data-tab="queue">Up Next</button><button class="chip" data-tab="about">About</button></div>

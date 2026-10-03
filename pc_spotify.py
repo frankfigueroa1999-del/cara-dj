@@ -202,8 +202,78 @@ def top_artists():
 
 
 def recently_played():
+    """What you played lately, newest first; each song says what it was played from (playlist, album...)."""
     j = safe(lambda: get("me/player/recently-played", limit=50)) or {}
-    return [t for t in (track(r.get("track")) for r in j.get("items") or []) if t]
+    out = []
+    for r in j.get("items") or []:
+        t = track(r.get("track"))
+        if t:
+            t["playedFrom"] = (r.get("context") or {}).get("uri") or ""
+            out.append(t)
+    return out
+
+
+def _id_of(uri, kind):
+    parts = (uri or "").split(":")
+    return parts[parts.index(kind) + 1] if kind in parts and parts.index(kind) + 1 < len(parts) else ""
+
+
+def shortcuts(recent, pls, artists_known, albums):
+    """The tiles at the top of Home: what you played lately (playlists, albums, artists, Liked Songs), newest first."""
+    mine = {p["id"]: p for p in pls}
+    known = {a["id"]: a for a in artists_known if a and a.get("id")}
+    out, seen, lookups = [], set(), 0
+    for t in recent:
+        ctx = t.get("playedFrom") or ""
+        if "collection" in ctx.split(":"):
+            key = "liked"
+        elif _id_of(ctx, "playlist"):
+            key = "playlist:" + _id_of(ctx, "playlist")
+        elif _id_of(ctx, "artist"):
+            key = "artist:" + _id_of(ctx, "artist")
+        elif t.get("albumId"):
+            key = "album:" + t["albumId"]                  # an album, or a single played on its own
+        else:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        kind, _, xid = key.partition(":")
+        if kind == "liked":
+            out.append({"kind": "liked", "name": "Liked Songs", "uri": ""})
+        elif kind == "playlist":
+            p = mine.get(xid)
+            if not p and lookups < 4:
+                lookups += 1
+                p = playlist(safe(lambda: get(f"playlists/{xid}", fields="id,uri,name,images,owner(display_name,id),collaborative,description,tracks(total)")))
+            if p:
+                out.append({"kind": "playlist", "id": p["id"], "uri": p["uri"], "name": p["name"], "art": p.get("imageMid") or p.get("image") or ""})
+        elif kind == "artist":
+            a = known.get(xid)
+            if not a and lookups < 4:
+                lookups += 1
+                a = artist(safe(lambda: get(f"artists/{xid}")))
+            if a:
+                out.append({"kind": "artist", "id": a["id"], "uri": a["uri"], "name": a["name"], "art": a.get("imageMid") or a.get("image") or ""})
+        else:
+            out.append({"kind": "album", "id": xid, "uri": "spotify:album:" + xid, "name": t.get("album") or "", "art": t.get("artMid") or t.get("art") or ""})
+        if len(out) >= 8:
+            break
+    for p in pls:                                          # not much played lately: your playlists fill in
+        if len(out) >= 8:
+            break
+        if "playlist:" + p["id"] not in seen:
+            seen.add("playlist:" + p["id"])
+            out.append({"kind": "playlist", "id": p["id"], "uri": p["uri"], "name": p["name"], "art": p.get("imageMid") or p.get("image") or ""})
+    for a in albums:
+        if len(out) >= 8:
+            break
+        if "album:" + a["id"] not in seen:
+            seen.add("album:" + a["id"])
+            out.append({"kind": "album", "id": a["id"], "uri": a["uri"], "name": a["name"], "art": a.get("artMid") or a.get("art") or ""})
+    if "liked" not in seen and len(out) < 8:
+        out.insert(0, {"kind": "liked", "name": "Liked Songs", "uri": ""})
+    return out[:8]
 
 
 def recent_albums(tracks):
@@ -246,6 +316,7 @@ def home(force=False):
     fo = out.get("following") or {"items": [], "after": None}
     value = {
         "me": out.get("me"),
+        "shortcuts": shortcuts(out.get("recent") or [], pls["items"], (out.get("artists") or []) + fo["items"], al["items"]),
         "recentAlbums": recent_albums(out.get("recent") or []),
         "topTracks": out.get("top") or [],
         "topArtists": out.get("artists") or [],
@@ -740,3 +811,96 @@ def _roles(rec, out):
     out["writers"] = roles.pop("Writer", [])
     out["producers"] = roles.pop("Producer", [])
     out["more"] = [{"role": r, "names": n} for r, n in roles.items()][:10]
+
+
+# ---------------------------------------------------------------- the Now Playing view's extras
+WIKIDATA = "https://query.wikidata.org/sparql"
+_extras = {}
+
+
+def _wd(query):
+    r = requests.get(WIKIDATA, params={"query": query, "format": "json"}, timeout=20,
+                     headers={"User-Agent": MB_AGENT, "Accept": "application/sparql-results+json"})
+    r.raise_for_status()
+    return (r.json().get("results") or {}).get("bindings") or []
+
+
+def _wv(b, k):
+    return ((b.get(k) or {}).get("value")) or ""
+
+
+def _lit(s):
+    return '"' + (s or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
+
+
+def _yt(v):
+    v = (v or "").strip()
+    return v if re.fullmatch(r"[A-Za-z0-9_-]{11}", v) else ""
+
+
+def now_extras(t):
+    """Besides the song itself, the Now Playing view shows its music video, the artist's other music videos and any
+    tour they're on. They come from Wikidata (the free knowledge base behind Wikipedia, which keeps the YouTube ids of
+    official videos); the videos play from YouTube."""
+    tid = (t or {}).get("id") or ""
+    arts = (t or {}).get("artists") or []
+    aid = (arts[0] or {}).get("id") if arts else ""
+    if not tid or not aid:
+        return {}
+    hit = _extras.get(tid)
+    if hit and time.time() - hit["at"] < 3600:
+        return hit["value"]
+    title = _bare(t.get("title") or "").lower()
+    queries = {
+        "video": f"""SELECT ?yt WHERE {{
+            {{ ?song wdt:P2207 {_lit(tid)} . }} UNION {{ ?artist wdt:P1902 {_lit(aid)} . ?song wdt:P175 ?artist ; rdfs:label ?l .
+               FILTER(LANG(?l) = "en" && LCASE(STR(?l)) = {_lit(title)}) }}
+            ?song wdt:P1651 ?yt . }} LIMIT 3""",
+        "videos": f"""SELECT ?song ?yt ?label ?date WHERE {{
+            ?artist wdt:P1902 {_lit(aid)} . ?song wdt:P175 ?artist ; wdt:P1651 ?yt ; rdfs:label ?label . FILTER(LANG(?label) = "en")
+            OPTIONAL {{ ?song wdt:P577 ?date . }} }} ORDER BY DESC(?date) LIMIT 40""",
+        "tours": f"""SELECT ?label ?start ?end ?article WHERE {{
+            ?artist wdt:P1902 {_lit(aid)} . ?tour wdt:P175 ?artist ; wdt:P31 wd:Q1573906 ; rdfs:label ?label . FILTER(LANG(?label) = "en")
+            OPTIONAL {{ ?tour wdt:P580 ?start . }} OPTIONAL {{ ?tour wdt:P582 ?end . }}
+            OPTIONAL {{ ?article schema:about ?tour ; schema:isPartOf <https://en.wikipedia.org/> . }} }} LIMIT 60""",
+    }
+    got = {}
+
+    def run(k, q):
+        try:
+            got[k] = _wd(q)
+        except Exception as e:
+            got[k] = None
+            print(f"[now playing: Wikidata didn't answer ({str(e)[:80]})]")
+
+    threads = [threading.Thread(target=run, args=kq, daemon=True) for kq in queries.items()]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(25)
+    out = {"video": None, "videos": [], "tours": []}
+    for b in got.get("video") or []:
+        if _yt(_wv(b, "yt")):
+            out["video"] = {"id": _yt(_wv(b, "yt"))}
+            break
+    seen = {out["video"]["id"]} if out["video"] else set()
+    for b in got.get("videos") or []:
+        yt, label = _yt(_wv(b, "yt")), _wv(b, "label")
+        if yt and yt not in seen and _bare(label).lower() != title:
+            seen.add(yt)
+            out["videos"].append({"id": yt, "title": label, "year": _wv(b, "date")[:4]})
+            if len(out["videos"]) >= 8:
+                break
+    today = time.strftime("%Y-%m-%d")
+    lately = f"{int(today[:4]) - 1}{today[4:]}"
+    tours = {}
+    for b in got.get("tours") or []:
+        start, end, name = _wv(b, "start")[:10], _wv(b, "end")[:10], _wv(b, "label")
+        if name and ((end and end >= today) or (not end and start and start >= lately)):
+            tours[name] = {"name": name, "start": start, "end": end, "url": _wv(b, "article")}
+    out["tours"] = sorted(tours.values(), key=lambda x: x["start"] or "9999")[:3]
+    if all(got.get(k) is not None for k in queries):          # only kept when Wikidata answered every question
+        if len(_extras) > 300:
+            _extras.clear()
+        _extras[tid] = {"at": time.time(), "value": out}
+    return out

@@ -18,7 +18,30 @@ const S = {
   search: { q: '', scope: 'all', results: null, loading: false, offset: 0, done: false, timer: 0 },
   lib: 'playlists',
   djSig: '', nowUri: '', artKey: '', connected: false,
+  ui: loadUi(),            // panes, zoom and library filters, remembered on this PC
+  nv: { key: '', mode: 'now', d: {}, lyricIdx: -2, video: null, failed: new Set() },
+  libQuery: '', homeKind: 'all', lyricsCache: new Map(),
 };
+
+// ---------------------------------------------------------------- the layout you left it in
+function loadUi() {
+  const d = { libMini: false, libW: 300, nvOpen: true, nvW: 340, zoom: 100, libKind: '', libSort: 'recent', npOnPlay: true };
+  try { return Object.assign(d, JSON.parse(localStorage.getItem('nsp-ui') || '{}')); } catch (e) { return d; }
+}
+function saveUi() { try { localStorage.setItem('nsp-ui', JSON.stringify(S.ui)); } catch (e) { /* a private window: fine */ } }
+function applyUi() {
+  const u = S.ui, b = document.body;
+  u.libW = Math.max(240, Math.min(440, u.libW || 300));
+  u.nvW = Math.max(290, Math.min(480, u.nvW || 340));
+  b.classList.toggle('lib-mini', !!u.libMini);
+  b.classList.toggle('nv-off', !u.nvOpen);
+  document.documentElement.style.setProperty('--lib-w', u.libW + 'px');
+  document.documentElement.style.setProperty('--nv-w', u.nvW + 'px');
+  document.documentElement.style.zoom = (u.zoom || 100) / 100;
+}
+const zf = () => (S.ui.zoom || 100) / 100;          // page zoom: screen coordinates divide by this
+function setZoom(z) { S.ui.zoom = Math.max(70, Math.min(130, Math.round(z / 10) * 10)); saveUi(); applyUi(); toast(`Zoom ${S.ui.zoom}%`, 'expand'); if (S.route.name === 'prefs') refresh(); }
+function zoomBy(d) { setZoom((S.ui.zoom || 100) + d); }
 
 // ---------------------------------------------------------------- little helpers
 function fmtTime(ms) { const s = Math.max(0, Math.floor((ms || 0) / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; }
@@ -75,11 +98,15 @@ function render(fresh = false, restoring = false) {
   const r = S.route, v = VIEWS[r.name] || VIEWS.home;
   const page = $('#page');
   page.innerHTML = v.html(r);
-  $('#topbar .title').textContent = v.title ? v.title(r) : '';
+  $('#main-head .title').textContent = v.title ? v.title(r) : '';
   $('#nav-back').disabled = !S.history.length;
   $('#nav-fwd').disabled = !S.future.length;
-  $$('.nav button').forEach(b => b.classList.toggle('on', b.dataset.tab === r.tab));
-  $$('.side-item[data-route]').forEach(b => b.classList.toggle('on', b.dataset.route === routeKey(r)));
+  $('#tb-home').classList.toggle('on', r.name === 'home');
+  $('.tb-browse').classList.toggle('on', r.name === 'search' && !S.search.q.trim());
+  const q = $('#search-input');
+  if (document.activeElement !== q) q.value = r.name === 'search' ? S.search.q : '';
+  $('#tb-clear').hidden = !(r.name === 'search' && S.search.q);
+  markLibrary();
   if (fresh) {
     page.style.animation = 'none'; void page.offsetWidth; page.style.animation = '';
     $('#scroller').scrollTop = restoring ? (r.scroll || 0) : 0;
@@ -103,6 +130,7 @@ function afterRender() {
   const log = $('#log'); if (log) { log.textContent = S.log.join('\n'); log.scrollTop = log.scrollHeight; }
   $$('input[type=range]').forEach(paintRange);
   const q = $('#search-input'); if (q && S.route.name === 'search' && document.activeElement !== q && S.route.focus) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); S.route.focus = false; }
+  if (S.route.name === 'cara' && S.route.focusLog) { const l = $('#log'); if (l) l.scrollIntoView({ block: 'center' }); S.route.focusLog = false; }
 }
 function paintRange(el) { const p = ((el.value - (el.min || 0)) / ((el.max || 100) - (el.min || 0))) * 100; el.style.setProperty('--p', p + '%'); }
 
@@ -119,6 +147,11 @@ function markNow() {
   $$('.card [data-ctx]').forEach(b => {
     const on = !!ctx && b.dataset.ctx === ctx && playing;
     b.classList.toggle('playing', on); b.innerHTML = icon(on ? 'pause' : 'play', 22);
+  });
+  $$('.shortcut').forEach(el => {
+    const b = el.querySelector('.sp'), c = el.dataset.ctx, here = !!ctx && !!c && c === ctx, on = here && playing;
+    el.classList.toggle('now', here);
+    if (b) { b.classList.toggle('playing', on); b.innerHTML = icon(on ? 'pause' : 'play', 18); }
   });
 }
 
@@ -221,14 +254,9 @@ function updateHero() {
   S.djSig = sig;
   $$('[data-live=hero]').forEach(el => { el.outerHTML = heroHTML(); });
   $$('[data-live=queue]').forEach(el => { el.outerHTML = queueSeg(); });
-  const live = !!d.running;
-  $('#brand-dot').className = 'dot' + (live ? ' live' : '');
-  $('#brand-status').textContent = live ? (d.speaking ? 'On the mic' : d.status) : (d.stationFull || 'Off air');
-  $('#brand-bars').outerHTML = bars(live).replace('class="bars', 'id="brand-bars" class="bars');
-  const b = $('#dj-btn');
-  b.className = 'dj-btn' + (d.speaking ? ' speaking' : live ? ' live' : '');
-  b.innerHTML = `${bars(live)}<span>${d.speaking ? 'On Air' : live ? 'Cara · Live' : 'Go Live'}</span>`;
-  b.title = live ? 'Cara is live. Click to end her show.' : 'Start Cara';
+  const live = !!d.running, dot = $('#tb-onair');
+  dot.hidden = !live; dot.classList.toggle('speaking', !!d.speaking);
+  $('#tb-menu').title = live ? (d.speaking ? 'Menu (Cara is on the mic)' : `Menu (Cara is live: ${d.status || 'on air'})`) : 'Menu';
 }
 function banners() {
   const s = S.state || {};
@@ -248,26 +276,39 @@ const VIEWS = {};
 VIEWS.home = {
   title: () => 'Home',
   html: () => {
-    const h = S.home;
-    const date = new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).toUpperCase();
-    let out = `<div class="hello"><div class="date">${esc(date)}</div><h1>${esc(greet())}${firstName() ? ', ' + esc(firstName()) : ''}</h1></div>${banners()}${heroHTML()}`;
+    const h = S.home, k = S.homeKind || 'all';
+    const chips = [['all', 'All'], ['playlists', 'Playlists'], ['albums', 'Albums'], ['artists', 'Artists']]
+      .map(([v, l]) => `<button class="chip ${k === v ? 'on' : ''}" data-act="home-kind" data-kind="${v}">${l}</button>`).join('');
+    let out = `${banners()}<div class="home-chips">${chips}</div>`;
     if (!h) return out + (S.state && S.state.connected ? loading() : '');
-    if (h.recentAlbums && h.recentAlbums.length) out += `<section class="block">${head('Recently Played')}${rowOf(h.recentAlbums.map(a => albumCard(a)))}</section>`;
-    if (h.topTracks && h.topTracks.length) out += `<section class="block">${head('On Repeat', 'Your most played lately')}${songGrid(h.topTracks.slice(0, 12), 'On Repeat')}</section>`;
-    if (h.topArtists && h.topArtists.length) out += `<section class="block">${head('Artists You Love')}${rowOf(h.topArtists.map(artistCard))}</section>`;
-    if (h.playlists && h.playlists.length) out += `<section class="block">${head('Your Playlists', '', 'data-act="lib" data-kind="playlists"')}${rowOf([likedCard(), ...h.playlists.slice(0, 20).map(playlistCard)])}</section>`;
-    if (h.albums && h.albums.length) out += `<section class="block">${head('Your Albums', '', 'data-act="lib" data-kind="albums"')}${rowOf(h.albums.slice(0, 20).map(a => albumCard(a)))}</section>`;
+    const want = x => k === 'all' || x.kind + 's' === k || (k === 'playlists' && x.kind === 'liked');
+    const sc = (h.shortcuts || []).filter(want);
+    if (sc.length) out += `<div class="shortcuts">${sc.map(shortcutTile).join('')}</div>`;
+    if ((k === 'all' || k === 'albums') && h.recentAlbums && h.recentAlbums.length) out += `<section class="block">${head('Jump back in')}${rowOf(h.recentAlbums.map(a => albumCard(a)))}</section>`;
+    if (k === 'all' && h.topTracks && h.topTracks.length) out += `<section class="block">${head('On Repeat', 'Your most played lately')}${songGrid(h.topTracks.slice(0, 12), 'On Repeat')}</section>`;
+    if ((k === 'all' || k === 'artists') && h.topArtists && h.topArtists.length) out += `<section class="block">${head('Your top artists')}${rowOf(h.topArtists.map(artistCard))}</section>`;
+    if ((k === 'all' || k === 'playlists') && h.playlists && h.playlists.length) out += `<section class="block">${head('Your playlists', '', 'data-act="lib" data-kind="playlists"')}${rowOf([likedCard(), ...h.playlists.slice(0, 20).map(playlistCard)])}</section>`;
+    if ((k === 'all' || k === 'albums') && h.albums && h.albums.length) out += `<section class="block">${head('Your albums', '', 'data-act="lib" data-kind="albums"')}${rowOf(h.albums.slice(0, 20).map(a => albumCard(a)))}</section>`;
+    if (k === 'artists' && h.artists && h.artists.length) out += `<section class="block">${head('Artists you follow')}${rowOf(h.artists.slice(0, 20).map(artistCard))}</section>`;
     return out;
   },
   load: async () => { if (S.state && S.state.connected) await loadHome(); },
 };
+function shortcutTile(x) {
+  const liked = x.kind === 'liked', id = myId();
+  const ctx = liked ? (id ? `spotify:user:${id}:collection` : '') : x.uri;
+  const open = liked ? 'data-act="open-liked"' : `data-act="open-${x.kind}" data-id="${esc(x.id)}"`;
+  const playBtn = liked ? `data-act="play-liked"` : `data-act="play-ctx" data-ctx="${esc(ctx)}"`;
+  const pic = liked ? likedArt(56, 0) : art(x.art, 56, { circle: x.kind === 'artist', icon: x.kind === 'artist' ? 'person' : x.kind === 'album' ? 'album' : 'queue' });
+  return `<div class="shortcut" role="button" ${open} data-ctx="${esc(ctx)}">${pic}<b>${esc(x.name)}</b><button class="sp" ${playBtn} title="Play ${esc(x.name)}">${icon('play', 18)}</button></div>`;
+}
 async function loadHome(force = false) {
   const h = await api.home(!!force);
-  if (h && !h.error) { S.home = h; remember(h.topTracks); remember(h.liked); renderSidebar(); }
+  if (h && !h.error) { S.home = h; remember(h.topTracks); remember(h.liked); renderLibrary(); }
 }
 
 VIEWS.cara = {
-  title: () => 'Cara',
+  title: () => "Cara's Studio",
   html: () => {
     const c = S.config, d = (S.state && S.state.dj) || {};
     const seg = (key, opts) => `<div class="seg">${opts.map(([v, l]) => `<button class="${String(c[key]) === String(v) ? 'on' : ''}" data-act="cfg" data-key="${key}" data-val="${v}">${l}</button>`).join('')}</div>`;
@@ -276,7 +317,7 @@ VIEWS.cara = {
     const slider = key => `<input type="range" min="0" max="100" value="${c[key]}" data-key="${key}">`;
     const moods = { chill: 'Laid-back, warm and smooth, with dry wit.', normal: 'Her usual bubbly, cheeky, quick self.', unhinged: 'Maximum playful chaos and mock outrage.', mixed: 'A different mood every break.' };
     const chats = { quick: 'A line or two, then the music.', normal: 'A short story or bit, then the music.', chatty: 'Proper segments: stories, games, news.' };
-    return `<h1 class="page-title">Cara</h1>${banners()}${heroHTML()}
+    return `<h1 class="page-title">Cara's Studio</h1>${banners()}${heroHTML()}
     <div class="cara-grid">
       <div class="card-box"><h3>${icon('forward', 20)}Next Transition</h3>${queueSeg()}<div class="foot">How her next break starts, at the end of this song. Otherwise she picks one of the styles she's allowed (Transitions, below).</div></div>
       <div class="card-box"><h3>${icon('bolt', 20)}Right Now</h3><div class="tiles4">
@@ -472,8 +513,7 @@ VIEWS.search = {
   title: () => 'Search',
   html: () => {
     const s = S.search, c = S.config;
-    let out = `<div class="search-box">${icon('search', 22)}<input id="search-input" placeholder="What do you want to play?" value="${esc(s.q)}" spellcheck="false" autocomplete="off">
-      ${s.q ? `<button class="icon-btn" data-act="search-clear" title="Clear">${icon('close', 18)}</button>` : ''}</div>`;
+    let out = '';
     if (!s.q.trim()) {
       const recent = c.recent_searches || [];
       if (recent.length) out += `<section class="block"><div class="section-head"><h2>Recent searches</h2><button class="more" data-act="search-forget">Clear</button></div><div class="chips">${recent.map(q => `<button class="chip" data-act="search-term" data-q="${esc(q)}">${esc(q)}</button>`).join('')}</div></section>`;
@@ -549,24 +589,73 @@ async function loadMore() {
   } finally { moreBusy = false; }
 }
 
-// ---------------------------------------------------------------- the sidebar
-function renderSidebar() {
-  const h = S.home, list = $('#side-list');
+// ---------------------------------------------------------------- Your Library (the left pane)
+function libItems() {
+  const h = S.home; if (!h) return [];
+  const id = myId();
+  const items = [{ kind: 'liked', key: 'liked:', name: 'Liked Songs', sub: `Playlist • ${plural(h.likedTotal || 0, 'song')}`, pinned: true, ctx: id ? `spotify:user:${id}:collection` : '', owner: '' }];
+  for (const p of h.playlists || []) items.push({ kind: 'playlist', key: 'playlist:' + p.id, id: p.id, name: p.name, sub: `Playlist • ${p.owner}`, art: p.imageMid || p.image, ctx: p.uri, owner: p.owner || '' });
+  for (const a of h.albums || []) items.push({ kind: 'album', key: 'album:' + a.id, id: a.id, name: a.name, sub: `Album • ${a.artist}`, art: a.artMid || a.art, ctx: a.uri, owner: a.artist || '' });
+  for (const a of h.artists || []) items.push({ kind: 'artist', key: 'artist:' + a.id, id: a.id, name: a.name, sub: 'Artist', art: a.imageMid || a.image, ctx: a.uri, owner: a.name });
+  return items;
+}
+function renderLibrary() {
+  const u = S.ui, list = $('#lib-list');
+  const kinds = [['playlist', 'Playlists'], ['album', 'Albums'], ['artist', 'Artists']];
+  $('#lib-chips').innerHTML = (u.libKind ? `<button class="lib-chip" data-act="lib-kind" data-kind="" title="Show everything">${icon('close', 14)}</button>` : '')
+    + kinds.filter(([k]) => !u.libKind || u.libKind === k).map(([k, l]) => `<button class="lib-chip ${u.libKind === k ? 'on' : ''}" data-act="lib-kind" data-kind="${k}">${l}</button>`).join('');
+  $('#lib-sort span').textContent = { recent: 'Recents', alpha: 'Alphabetical', creator: 'Creator' }[u.libSort] || 'Recents';
+  let items = libItems();
+  if (u.libKind) items = items.filter(x => x.kind === u.libKind || (u.libKind === 'playlist' && x.kind === 'liked'));
+  const q = (S.libQuery || '').trim().toLowerCase();
+  if (q) items = items.filter(x => (x.name + ' ' + x.sub).toLowerCase().includes(q));
+  const pin = (a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0);
+  if (u.libSort === 'alpha') items.sort((a, b) => pin(a, b) || a.name.localeCompare(b.name));
+  else if (u.libSort === 'creator') items.sort((a, b) => pin(a, b) || a.owner.localeCompare(b.owner) || a.name.localeCompare(b.name));
+  else {                                                   // Recents: what you played lately first
+    const recent = ((S.home && S.home.shortcuts) || []).map(x => x.kind === 'liked' ? 'liked:' : x.kind + ':' + x.id);
+    const rank = x => { const i = recent.indexOf(x.key); return i < 0 ? 999 : i; };
+    items = items.map((x, i) => [x, i]).sort((a, b) => pin(a[0], b[0]) || rank(a[0]) - rank(b[0]) || a[1] - b[1]).map(a => a[0]);
+  }
   const playing = now() && now().context;
-  const items = [`<button class="side-item" data-route="liked:" data-act="open-liked">${likedArt(40, 7)}<div class="ell"><b class="ell">Liked Songs</b><small class="ell">${h ? plural(h.likedTotal || 0, 'song') : 'Playlist'}</small></div></button>`];
-  for (const p of (h && h.playlists) || []) items.push(`<button class="side-item ${playing === p.uri ? 'playing' : ''}" data-route="playlist:${esc(p.id)}" data-act="open-playlist" data-id="${esc(p.id)}">${art(p.imageMid || p.image, 40, { icon: 'queue' })}<div class="ell"><b class="ell">${esc(p.name)}</b><small class="ell">Playlist • ${esc(p.owner)}</small></div></button>`);
-  list.innerHTML = items.join('');
-  $$('.side-item[data-route]').forEach(b => b.classList.toggle('on', b.dataset.route === routeKey(S.route)));
-  const me = S.state && S.state.me;
-  $('#me-avatar').style.backgroundImage = me && me.image ? `url('${me.image}')` : '';
-  $('#me-avatar').innerHTML = me && me.image ? '' : icon('person', 18);
-  $('#me-name').textContent = me ? me.name : 'Settings';
+  const openOf = x => x.kind === 'liked' ? 'data-act="open-liked"' : `data-act="open-${x.kind}" data-id="${esc(x.id)}"`;
+  list.innerHTML = items.length ? items.map(x => {
+    const on = !!playing && !!x.ctx && playing === x.ctx;
+    const pic = x.kind === 'liked' ? likedArt(48, 8) : art(x.art, 48, { circle: x.kind === 'artist', icon: x.kind === 'artist' ? 'person' : x.kind === 'album' ? 'album' : 'queue' });
+    return `<button class="lib-item ${x.kind} ${on ? 'playing' : ''}" data-route="${esc(x.key)}" ${openOf(x)} title="${esc(x.name)}">${pic}<div class="ell"><b class="ell">${esc(x.name)}</b><small class="ell">${x.pinned ? icon('pin', 13) : ''}${esc(x.sub)}</small></div>${on ? `<span class="vol-ic">${icon('volume', 16)}</span>` : ''}</button>`;
+  }).join('') : `<div class="lib-empty">${S.home ? (q ? `Nothing in your library matches “${esc(q)}”.` : 'Your playlists, albums and artists show up here.') : (S.state && S.state.connected ? 'Loading your library…' : 'Connect Spotify to see your library.')}</div>`;
+  markLibrary();
+  const me = S.state && S.state.me, av = $('#me-avatar');
+  av.style.backgroundImage = me && me.image ? `url('${me.image}')` : '';
+  av.innerHTML = me && me.image ? '' : icon('person', 18);
+  $('#tb-me').title = me ? me.name : 'Account';
+}
+function markLibrary() { $$('.lib-item[data-route]').forEach(b => b.classList.toggle('on', b.dataset.route === routeKey(S.route))); }
+const renderSidebar = renderLibrary;
+let libBusy = false;
+async function loadLibMore() {
+  const h = S.home, box = $('#lib-list');
+  if (!h || libBusy || box.scrollTop + box.clientHeight < box.scrollHeight - 300) return;
+  libBusy = true;
+  try {
+    if (h.playlists.length < h.playlistsTotal) { const x = await api.more('playlists', h.playlists.length); if (x && x.items && x.items.length) h.playlists.push(...x.items.filter(p => !h.playlists.some(q => q.id === p.id))); else h.playlistsTotal = h.playlists.length; }
+    else if (h.albums.length < h.albumsTotal) { const x = await api.more('albums', h.albums.length); if (x && x.items && x.items.length) h.albums.push(...x.items); else h.albumsTotal = h.albums.length; }
+    else if (h.artistsAfter) { const x = await api.more('artists', 0, h.artistsAfter); if (x && x.items) { h.artists.push(...x.items); h.artistsAfter = x.after; } else h.artistsAfter = null; }
+    else return;
+    renderLibrary();
+  } finally { libBusy = false; }
+}
+function toggleLibrary() { S.ui.libMini = !S.ui.libMini; saveUi(); applyUi(); }
+function libSortMenu(x, y) {
+  const opt = (k, l) => ({ label: l, check: S.ui.libSort === k, run: () => { S.ui.libSort = k; saveUi(); renderLibrary(); } });
+  showMenu([{ head: 'Sort by' }, opt('recent', 'Recents'), opt('alpha', 'Alphabetical'), opt('creator', 'Creator')], x, y, { plain: true });
 }
 
 // ---------------------------------------------------------------- playing music
 async function play(opts, name) {
   const r = await api.play(opts.context || null, opts.offset || null, opts.uris || null, opts.position ?? null, opts.shuffle ?? null);
   if (r !== 'ok') toast(typeof r === 'string' ? r : "Spotify wouldn't play that.", 'warning');
+  else if (S.ui.npOnPlay && !S.ui.nvOpen) openNV('now');      // Spotify's "show the now-playing panel on click of play"
 }
 function playRow(el) {
   const uri = el.dataset.uri, ctx = el.dataset.ctx, list = el.dataset.list;
@@ -576,14 +665,14 @@ function playRow(el) {
 }
 function updateLike(uri, on) {
   S.liked.set(uri, on);
-  $$(`[data-act=like][data-uri="${CSS.escape(uri)}"]`).forEach(b => { b.classList.toggle('liked', on); b.innerHTML = icon(on ? 'heart' : 'heartOutline', 18); });
-  if (S.state && S.state.now && S.state.now.track && S.state.now.track.uri === uri) { S.state.now.liked = on; updateBar(); updateNP(); }
+  $$(`[data-act=like][data-uri="${CSS.escape(uri)}"]`).forEach(b => { b.classList.toggle('liked', on); b.innerHTML = icon(on ? 'checkCircle' : 'addCircle', 18); });
+  if (S.state && S.state.now && S.state.now.track && S.state.now.track.uri === uri) { S.state.now.liked = on; updateBar(); updateNP(); nvSong(); }
 }
 async function toggleLike(uri) {
   const on = !S.liked.get(uri) && !(nowUri() === uri && now().liked);
   updateLike(uri, on);
   const ok = await api.set_saved(uri, on);
-  if (ok === true) toast(on ? 'Added to Liked Songs' : 'Removed from Liked Songs', on ? 'heart' : 'heartOutline');
+  if (ok === true) toast(on ? 'Added to Liked Songs' : 'Removed from Liked Songs', on ? 'checkCircle' : 'addCircle');
   else { updateLike(uri, !on); toast("Spotify wouldn't save that.", 'warning'); }
   if (S.home) loadHome(true);
 }
@@ -595,15 +684,16 @@ function updateBar() {
   if (t) {
     if (bar.dataset.uri !== t.uri) {
       bar.dataset.uri = t.uri;
-      $('#bar-art').innerHTML = art(t.artMid || t.art, 60) + `<div class="expand">${icon('expand', 20)}</div>`;
+      $('#bar-art').innerHTML = art(t.artMid || t.art, 56);
       $('#bar-title').textContent = t.title;
       $('#bar-artist').innerHTML = artistLinks(t);
     }
     const liked = n.liked ?? S.liked.get(t.uri);
-    const lb = $('#bar-like'); lb.hidden = false; lb.classList.toggle('liked', !!liked); lb.innerHTML = icon(liked ? 'heart' : 'heartOutline', 18);
+    const lb = $('#bar-like'); lb.hidden = false; lb.classList.toggle('liked', !!liked); lb.innerHTML = icon(liked ? 'checkCircle' : 'addCircle', 19);
+    lb.title = liked ? 'Remove from Liked Songs' : 'Save to your Liked Songs';
   } else {
     bar.dataset.uri = '';
-    $('#bar-art').innerHTML = art('', 60);
+    $('#bar-art').innerHTML = art('', 56);
     $('#bar-title').textContent = S.state && S.state.connected ? 'Nothing playing' : 'Not connected';
     $('#bar-artist').textContent = S.state && S.state.connected ? 'Pick something to play' : 'Connect Spotify in Settings';
     $('#bar-like').hidden = true;
@@ -615,8 +705,16 @@ function updateBar() {
   $('#bar-repeat').classList.toggle('on', rep !== 'off');
   $('#bar-repeat').innerHTML = icon(rep === 'track' ? 'repeatOne' : 'repeat', 20);
   const dev = n && n.device;
-  $('#bar-dev').classList.toggle('on', !!dev);
-  $('#bar-dev').title = dev ? `Playing on ${dev.name}` : 'Devices';
+  const pl = (S.state && S.state.player) || {};
+  const here = !!dev && ((pl.deviceId && dev.id === pl.deviceId) || dev.name === (pl.name || 'Non Stop Pop DJ'));
+  $('#bar-dev').classList.toggle('on', !!dev && !here);
+  $('#bar-dev').title = dev ? (here ? 'Playing in this app' : `Playing on ${dev.name}`) : 'Connect to a device';
+  const strip = $('#playing-on'), away = !!(t && dev && !here);
+  strip.hidden = !away;
+  if (away) strip.innerHTML = `${icon(dev.type === 'computer' ? 'computer' : dev.type === 'smartphone' ? 'phone' : 'speaker', 15)}Playing on ${esc(dev.name)}`;
+  $('#bar-nv').classList.toggle('active', S.ui.nvOpen && S.nv.mode === 'now');
+  $('#bar-queue').classList.toggle('active', S.ui.nvOpen && S.nv.mode === 'queue');
+  $('#bar-lyrics').classList.toggle('active', S.np.open && S.np.tab === 'lyrics');
   const vol = $('#bar-vol');
   if (dev && dev.volume != null && document.activeElement !== vol && Date.now() - (vol.dataset.t || 0) > 2500) { vol.value = dev.volume; paintRange(vol); }
   $('#bar-mute').innerHTML = icon(dev && dev.volume === 0 ? 'volumeOff' : 'volume', 20);
@@ -636,6 +734,7 @@ function tickProgress() {
     if (b) b.textContent = id === 'np' ? '-' + fmtTime(dur - p) : fmtTime(dur);
   }
   if (S.np.open && S.np.tab === 'lyrics') syncLyrics(p);
+  if (S.ui.nvOpen) nvTick(p);
   requestAnimationFrame(tickProgress);
 }
 function seekFrom(e, el) {
@@ -657,6 +756,164 @@ function wireSeek(el) {
     el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
   });
 }
+
+// ---------------------------------------------------------------- the Now Playing view (the right pane)
+// The song's music video (muted, in time with the music) or its cover, a lyrics preview, the artist's other music
+// videos, about the artist, credits, any tour they're on, and what's next. The bar's queue button turns it into the queue.
+function toggleNV(mode) {
+  const u = S.ui;
+  if (u.nvOpen && S.nv.mode === mode) u.nvOpen = false; else { u.nvOpen = true; S.nv.mode = mode; }
+  saveUi(); applyUi(); updateBar();
+  if (u.nvOpen) nvRender(true); else nvStopVideo();
+}
+function openNV(mode = 'now') { if (!S.ui.nvOpen || S.nv.mode !== mode) toggleNV(mode); }
+async function getLyrics(t) {
+  if (S.lyricsCache.has(t.uri)) return S.lyricsCache.get(t.uri);
+  const l = await api.lyrics(t.title, t.artist, t.album, t.duration);
+  const v = l && !l.error ? l : null;
+  if (v) { S.lyricsCache.set(t.uri, v); if (S.lyricsCache.size > 60) S.lyricsCache.delete(S.lyricsCache.keys().next().value); }
+  return v || { lines: [], plain: '', message: "Couldn't reach the lyrics right now." };
+}
+function nvLoad(t) {
+  const key = t.uri, d = S.nv.d = { t };
+  S.nv.key = key; S.nv.lyricIdx = -2;
+  const done = (k, v) => { if (S.nv.key !== key) return; d[k] = v; nvRender(); };
+  getLyrics(t).then(v => done('lyrics', v));
+  api.about(t).then(v => done('about', v && !v.error ? v : {}));
+  api.credits(t.id).then(v => done('credits', v && !v.error ? v : null));
+  api.now_extras(t).then(v => done('extras', v && !v.error ? v : {}));
+  api.up_next().then(v => done('next', Array.isArray(v) ? remember(v) : []));
+}
+// the lyrics card takes the cover's colour, like Spotify's
+function nvTint(url) {
+  const pane = $('#nowview');
+  if (!url) return pane.style.removeProperty('--tint');
+  const im = new Image(); im.crossOrigin = 'anonymous';
+  im.onload = () => {
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = 12;
+      const g = c.getContext('2d'); g.drawImage(im, 0, 0, 12, 12);
+      const px = g.getImageData(0, 0, 12, 12).data;
+      let r = 0, gg = 0, b = 0, w = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        const mx = Math.max(px[i], px[i + 1], px[i + 2]), mn = Math.min(px[i], px[i + 1], px[i + 2]);
+        const wt = 0.15 + (mx - mn) / 255;                       // colourful pixels count more than greys
+        r += px[i] * wt; gg += px[i + 1] * wt; b += px[i + 2] * wt; w += wt;
+      }
+      pane.style.setProperty('--tint', `rgb(${Math.round(r / w)}, ${Math.round(gg / w)}, ${Math.round(b / w)})`);
+    } catch (e) { pane.style.removeProperty('--tint'); }        // the picture's server didn't allow reading it
+  };
+  im.onerror = () => pane.style.removeProperty('--tint');
+  im.src = url;
+}
+function nvSong() {
+  const t = nowTrack(), box = $('#nv-song'); if (!t || !box) return;
+  const liked = now().liked ?? S.liked.get(t.uri);
+  box.innerHTML = `<div class="ell"><h2 class="ell"><button data-act="open-album" data-id="${esc(t.albumId || '')}">${esc(t.title)}</button></h2><p class="ell">${artistLinks(t)}</p></div>
+    <button class="icon-btn ${liked ? 'liked' : ''}" data-act="like" data-uri="${esc(t.uri)}" title="${liked ? 'Remove from Liked Songs' : 'Save to your Liked Songs'}">${icon(liked ? 'checkCircle' : 'addCircle', 24)}</button>`;
+}
+function nvRender(force = false) {
+  if (!S.ui.nvOpen) return;
+  const body = $('#nv-body'), n = now(), t = nowTrack();
+  $('#nv-ctx').innerHTML = S.nv.mode === 'queue' ? 'Queue' : n && n.contextName ? esc(n.contextName) : 'Now playing';
+  if (S.nv.mode === 'queue') { nvStopVideo(); return nvQueue(force); }
+  if (!t) { nvStopVideo(); body.innerHTML = `<div class="nv-quiet" style="padding:30px 6px">Play something and it shows up here: its video, lyrics, the artist, credits and what's next.</div>`; S.nv.key = ''; return; }
+  if (S.nv.key !== t.uri || force && !S.nv.d.t) nvLoad(t);
+  const d = S.nv.d, x = d.extras || {}, a = d.about || {}, c = d.credits;
+  let media = $('#nv-media');
+  if (!media || media.dataset.uri !== t.uri) {
+    nvStopVideo();
+    body.innerHTML = `<div class="nv-media" id="nv-media" data-uri="${esc(t.uri)}">${art(t.art || t.artMid, 0, { icon: 'note' })}<div class="nv-song" id="nv-song"></div></div><div id="nv-rest"></div>`;
+    media = $('#nv-media');
+    nvSong(); nvTint(t.artMid || t.art);
+  }
+  if (x.video && !S.nv.video && !S.nv.failed.has(x.video.id)) nvStartVideo(x.video.id);
+  const lines = d.lyrics && d.lyrics.lines && d.lyrics.lines.length ? d.lyrics.lines : null;
+  const plain = !lines && d.lyrics && d.lyrics.plain ? d.lyrics.plain.split('\n').filter(Boolean) : null;
+  const parts = [];
+  if (lines || plain) parts.push(`<section class="nv-card nv-lyrics" data-act="nv-lyrics" title="Show the full lyrics"><h3>Lyrics preview</h3><div class="lines" id="nv-lines">${(plain || []).slice(0, 5).map(l => `<p>${esc(l)}</p>`).join('')}</div></section>`);
+  if (x.videos && x.videos.length) parts.push(`<section class="nv-card"><h3>Related music videos</h3><div class="nv-vids">${x.videos.map(v => `<button class="nv-vid" data-act="nv-video" data-title="${esc(v.title)}" title="Play ${esc(v.title)}"><div class="thumb" style="background-image:url('https://i.ytimg.com/vi/${esc(v.id)}/mqdefault.jpg')"></div><b class="ell">${esc(v.title)}</b><small>${esc(t.artist)}${v.year ? ' • ' + esc(v.year) : ''}</small></button>`).join('')}</div></section>`);
+  const aid = t.artists && t.artists[0] && t.artists[0].id;
+  if (d.about) parts.push(`<section class="nv-card nv-artist" ${aid ? `data-act="open-artist" data-id="${esc(aid)}" role="button"` : ''} style="${a.artistImage ? `background-image:url('${esc(a.artistImage)}')` : ''}"><span class="label">About the artist</span>
+    <div class="in"><b>${esc(t.artist)}</b><span class="meta">${a.followers ? plural(a.followers, 'follower') : ''}${a.followers && a.genres && a.genres.length ? ' • ' : ''}${a.genres && a.genres.length ? esc(a.genres.slice(0, 3).join(', ')) : ''}</span>${a.bio ? `<p>${esc(a.bio)}</p>` : ''}</div></section>`);
+  if (c) {
+    const rows = [...c.performers.slice(0, 3).map(nm => [nm, 'Main Artist']), ...c.writers.slice(0, 3).map(nm => [nm, 'Writer']), ...c.producers.slice(0, 2).map(nm => [nm, 'Producer'])];
+    const merged = [];
+    for (const [nm, role] of rows) { const m = merged.find(r => r[0] === nm); if (m) m[1] += `, ${role}`; else merged.push([nm, role]); }
+    parts.push(`<section class="nv-card"><h3>Credits<button class="more" data-act="nv-credits">Show all</button></h3>${merged.slice(0, 5).map(([nm, role]) => `<div class="nv-credit"><div class="ell"><b class="ell">${esc(nm)}</b><small>${esc(role)}</small></div></div>`).join('')}</section>`);
+  }
+  if (x.tours && x.tours.length) parts.push(`<section class="nv-card"><h3>On tour</h3>${x.tours.map(tr => { const dt = tr.start ? new Date(tr.start + 'T12:00:00') : null; return `<button class="nv-tour" ${tr.url ? `data-act="open-url" data-url="${esc(tr.url)}"` : ''}><div class="cal">${dt ? `<small>${dt.toLocaleString(undefined, { month: 'short' }).toUpperCase()}</small>${dt.getDate()}` : icon('ticket', 20)}</div><div class="ell"><b class="ell">${esc(tr.name)}</b><span>${tr.start ? `From ${esc(prettyDate(tr.start))}` : ''}${tr.end ? ` to ${esc(prettyDate(tr.end))}` : ''}</span></div></button>`; }).join('')}</section>`);
+  if (d.next) parts.push(`<section class="nv-card nv-next"><h3>Next in queue<button class="more" data-act="nv-queue">Open queue</button></h3>${d.next[0] ? qRow(d.next[0]) : '<div class="nv-quiet">Nothing queued after this song.</div>'}</section>`);
+  $('#nv-rest').innerHTML = parts.join('');
+  S.nv.lyricIdx = -2; nvTick(progressNow());
+}
+function qRow(x) { return `<div class="q-row" data-row data-uri="${esc(x.uri)}">${art(x.artMid, 48)}<div class="ell"><b class="ell">${esc(x.title)}</b><small class="ell">${esc(x.artistLine)}</small></div><button class="icon-btn" data-act="track-menu" data-uri="${esc(x.uri)}">${icon('more', 18)}</button></div>`; }
+async function nvQueue(force) {
+  const body = $('#nv-body'), t = nowTrack();
+  if (force || !body.dataset.q) body.innerHTML = loading();
+  body.dataset.q = '1';
+  const q = await api.up_next();
+  if (S.nv.mode !== 'queue' || !S.ui.nvOpen) return;
+  const list = Array.isArray(q) ? remember(q) : [];
+  body.innerHTML = `<div class="nv-queue">${t ? `<h4>Now playing</h4><div class="q-row now" data-row data-uri="${esc(t.uri)}">${art(t.artMid, 48)}<div class="ell"><b class="ell">${esc(t.title)}</b><small class="ell">${esc(t.artistLine)}</small></div></div>` : ''}
+    <h4 style="margin-top:18px">Next up</h4>${list.length ? list.map(qRow).join('') : '<div class="nv-quiet">Nothing queued after this song.</div>'}</div>`;
+}
+function nvTick(p) {
+  if (S.nv.mode !== 'now') return;
+  const d = S.nv.d, box = $('#nv-lines');
+  const lines = d && d.lyrics && d.lyrics.lines;
+  if (box && lines && lines.length) {
+    let lo = 0, hi = lines.length - 1, found = -1; const pos = p + 250;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (lines[mid].t <= pos) { found = mid; lo = mid + 1; } else hi = mid - 1; }
+    if (found !== S.nv.lyricIdx) {
+      S.nv.lyricIdx = found;
+      const from = Math.max(0, found);
+      box.innerHTML = lines.slice(from, from + 5).map((l, i) => `<p class="${from + i === found ? 'now' : ''}">${esc(l.text || '♪')}</p>`).join('');
+    }
+  }
+  nvSyncVideo(p);
+}
+// the music video: YouTube's own player, muted (the music comes from Spotify), kept in time with the song
+function nvStartVideo(id) {
+  const media = $('#nv-media'); if (!media) return;
+  const f = document.createElement('iframe');
+  const start = Math.floor(progressNow() / 1000);
+  f.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1&mute=1&controls=0&disablekb=1&fs=0&iv_load_policy=3&modestbranding=1&playsinline=1&rel=0&loop=1&playlist=${encodeURIComponent(id)}&enablejsapi=1&start=${start}&origin=${encodeURIComponent(location.origin)}`;
+  f.allow = 'autoplay; encrypted-media; picture-in-picture';
+  f.title = 'Music video';
+  f.setAttribute('tabindex', '-1');
+  S.nv.video = { id, el: f, time: null, at: 0, state: -1, synced: 0 };
+  f.addEventListener('load', () => { try { f.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 1, channel: 'widget' }), '*'); } catch (e) { /* gone */ } });
+  media.insertBefore(f, media.querySelector('.nv-song'));
+}
+function nvVideoCmd(func, args = []) { const v = S.nv.video; if (v && v.el.contentWindow) v.el.contentWindow.postMessage(JSON.stringify({ event: 'command', func, args }), '*'); }
+function nvStopVideo() { const v = S.nv.video; if (v) { v.el.remove(); S.nv.video = null; } const b = $('#nv-media .badge'); if (b) b.remove(); }
+function nvSyncVideo(p) {
+  const v = S.nv.video; if (!v || v.state < 0) return;
+  const playing = !!(now() && now().playing);
+  if (!playing && v.state === 1) nvVideoCmd('pauseVideo');
+  if (playing && v.state === 2) nvVideoCmd('playVideo');
+  if (v.time == null || Date.now() - v.synced < 4000) return;
+  const vt = v.time + (v.state === 1 ? (Date.now() - v.at) / 1000 : 0);
+  if (Math.abs(vt - p / 1000) > 2.5) { v.synced = Date.now(); nvVideoCmd('seekTo', [p / 1000, true]); }
+}
+window.addEventListener('message', e => {
+  const v = S.nv.video; if (!v || e.source !== v.el.contentWindow) return;
+  let m; try { m = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch (err) { return; }
+  if (!m || !m.event) return;
+  if (m.event === 'onError') { S.nv.failed.add(v.id); nvStopVideo(); return; }   // this one can't play outside YouTube
+  const info = m.info;
+  if (m.event === 'onStateChange' && typeof info === 'number') v.state = info;
+  if (m.event === 'infoDelivery' && info) {
+    if (typeof info.playerState === 'number') v.state = info.playerState;
+    if (typeof info.currentTime === 'number') { v.time = info.currentTime; v.at = Date.now(); }
+  }
+  if (v.state === 1 && !v.el.classList.contains('on')) {
+    v.el.classList.add('on');
+    const media = $('#nv-media');
+    if (media && !media.querySelector('.badge')) media.insertAdjacentHTML('afterbegin', `<span class="badge">${icon('video', 14)}Music video</span>`);
+  }
+});
 
 // ---------------------------------------------------------------- the big player (lyrics, up next, about)
 function openNP(tabName) {
@@ -680,12 +937,11 @@ function updateNP(force = false) {
     loadNPTab();
   }
   const liked = t && (n.liked ?? S.liked.get(t.uri));
-  const lb = $('#np-like'); lb.classList.toggle('liked', !!liked); lb.innerHTML = icon(liked ? 'heart' : 'heartOutline', 24);
+  const lb = $('#np-like'); lb.classList.toggle('liked', !!liked); lb.innerHTML = icon(liked ? 'checkCircle' : 'addCircle', 26);
   $('#np-play').innerHTML = icon(n && n.playing ? 'pause' : 'play', 34);
   $('#np-shuffle').classList.toggle('on', !!(n && n.shuffle));
   const rep = (n && n.repeat) || 'off';
   $('#np-repeat').classList.toggle('on', rep !== 'off'); $('#np-repeat').innerHTML = icon(rep === 'track' ? 'repeatOne' : 'repeat', 24);
-  const dj = $('#np-dj'); dj.classList.toggle('on', !!d.running); dj.title = d.running ? 'End her show' : 'Go live';
   $('#np-device').innerHTML = n && n.device ? `${icon(n.device.type === 'computer' ? 'computer' : n.device.type === 'smartphone' ? 'phone' : 'speaker', 16)}${esc(n.device.name)}` : '';
   const cap = $('#np-caption');
   const line = d.kind === 'duo' && d.duo && d.duo.length ? d.duo.map(r => `${r.who}: ${r.text}`).join('  ') : (d.line || '').replace(/\[[^\]]*\]/g, '');
@@ -751,54 +1007,156 @@ function syncLyrics(p) {
 }
 
 // ---------------------------------------------------------------- menus and sheets
-function menuHtml(items) {
+function menuHtml(items, plain) {
   return items.map((it, i) => it === '-' ? '<hr>' : it.head ? `<div class="menu-head">${esc(it.head)}</div>`
-    : `<button data-i="${i}" class="${it.on ? 'on' : ''}${it.sub ? ' has-sub' : ''}">${icon(it.icon || 'note', 18)}<span class="ell">${esc(it.label)}</span>${it.sub ? `<span class="sub-arrow">${icon('forward', 16)}</span>` : ''}</button>`).join('');
+    : `<button data-i="${i}" class="${it.on ? 'on' : ''}${it.sub ? ' has-sub' : ''}" ${it.disabled ? 'disabled' : ''}>`
+      + (plain ? `<span class="chk">${it.check ? icon('check', 16) : ''}</span>` : icon(it.icon || 'note', 18))
+      + `<span class="ell">${esc(it.label)}</span>${it.kbd ? `<span class="kbd">${esc(it.kbd)}</span>` : ''}`
+      + `${it.sub ? `<span class="sub-arrow">${icon('forward', 16)}</span>` : ''}</button>`).join('');
 }
-// A menu; items with `sub` (a list, or a function that makes one) open a second menu beside it, like Spotify's
-function showMenu(items, x, y) {
-  closeMenu();
-  const m = document.createElement('div'); m.id = 'menu'; m.className = 'menu';
-  m.innerHTML = menuHtml(items);
+// Menus, Spotify style: an item with `sub` (a list, or a function that makes one) opens another menu beside it,
+// as deep as needed. { plain: true } draws them like Spotify's … menu: no icons, check marks and shortcuts instead.
+const MENUS = [];
+function closeMenusFrom(level) {
+  while (MENUS.length > level) { const m = MENUS.pop(); m.el.remove(); if (m.from) m.from.classList.remove('open'); }
+}
+function closeSub() { closeMenusFrom(1); }
+function closeMenu() { closeMenusFrom(0); const d = $('#tb-menu'); if (d) d.classList.remove('open'); }
+function showMenu(items, x, y, o = {}) { closeMenu(); openMenuLevel(items, x / zf(), y / zf(), 0, null, o); }
+function openMenuLevel(items, x, y, level, from, o) {
+  const z = zf(), W = innerWidth / z, H = innerHeight / z;
+  const m = document.createElement('div');
+  m.id = level ? (level > 1 ? 'menu-sub' + level : 'menu-sub') : 'menu';
+  m.className = 'menu' + (o.plain ? ' plain' : '');
+  m.innerHTML = menuHtml(items, o.plain);
   document.body.appendChild(m);
-  // sizes from layout (offset*), not getBoundingClientRect: the menu pops in scaled down, which would skew them
-  const mx = Math.max(8, Math.min(x, innerWidth - m.offsetWidth - 10)), my = Math.max(8, Math.min(y, innerHeight - m.offsetHeight - 10));
-  m.style.left = mx + 'px';
-  m.style.top = my + 'px';
-  let timer = null, opening = 0;
+  // sizes from layout (offset*), not getBoundingClientRect: menus pop in scaled down, which would skew them
+  let left = x, top = y;
+  if (level) {
+    const p = MENUS[level - 1].el, px = parseFloat(p.style.left), pw = p.offsetWidth;
+    left = px + pw - 4;
+    if (left + m.offsetWidth > W - 8) left = px - m.offsetWidth + 4;          // no room on the right: open on the left
+    top = parseFloat(p.style.top) + from.offsetTop - 6 - p.scrollTop;
+  }
+  m.style.left = Math.max(8, Math.min(left, W - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(top, H - m.offsetHeight - 8)) + 'px';
+  const entry = { el: m, from, items, timer: 0, ticket: 0 };
+  MENUS[level] = entry;
+  if (from) from.classList.add('open');
   const openSub = async b => {
-    const s0 = $('#menu-sub');
-    if (s0 && s0.dataset.from === b.dataset.i) return;
-    closeSub();
-    const it = items[+b.dataset.i], ticket = ++opening;
+    const next = MENUS[level + 1];
+    if (next && next.from === b) return;
+    closeMenusFrom(level + 1);
+    const it = items[+b.dataset.i], ticket = ++entry.ticket;
     const sub = typeof it.sub === 'function' ? await it.sub() : it.sub;
-    if (ticket !== opening || !document.body.contains(m) || !sub || !sub.length) return;
-    const s = document.createElement('div'); s.id = 'menu-sub'; s.className = 'menu'; s.dataset.from = b.dataset.i;
-    s.innerHTML = menuHtml(sub);
-    document.body.appendChild(s);
-    const sw = s.offsetWidth, sh = s.offsetHeight;
-    let left = mx + m.offsetWidth - 4;
-    if (left + sw > innerWidth - 8) left = mx - sw + 4;          // no room on the right: open on the left
-    s.style.left = Math.max(8, left) + 'px';
-    s.style.top = Math.max(8, Math.min(my + b.offsetTop - 6, innerHeight - sh - 8)) + 'px';
-    b.classList.add('open');
-    s.addEventListener('click', e => { const sb = e.target.closest('button[data-i]'); if (!sb) return; e.stopPropagation(); const si = sub[+sb.dataset.i]; closeMenu(); if (si.run) si.run(); });
+    if (ticket !== entry.ticket || MENUS[level] !== entry || !sub || !sub.length) return;
+    openMenuLevel(sub, 0, 0, level + 1, b, o);
   };
+  m.addEventListener('mousedown', e => e.preventDefault());     // keep the cursor where it was (Edit > Copy and friends)
   m.addEventListener('mouseover', e => {
     const b = e.target.closest('button[data-i]'); if (!b) return;
-    clearTimeout(timer);
-    timer = setTimeout(() => { if (items[+b.dataset.i].sub) openSub(b); else { opening++; closeSub(); } }, 120);
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => { if (items[+b.dataset.i].sub && !b.disabled) openSub(b); else { entry.ticket++; closeMenusFrom(level + 1); } }, 120);
   });
   m.addEventListener('click', e => {
-    const b = e.target.closest('button[data-i]'); if (!b) return;
+    const b = e.target.closest('button[data-i]'); if (!b || b.disabled) return;
     e.stopPropagation();
     const it = items[+b.dataset.i];
-    if (it.sub) { clearTimeout(timer); openSub(b); return; }
+    if (it.sub) { clearTimeout(entry.timer); openSub(b); return; }
     closeMenu(); if (it.run) it.run();
   });
+  return m;
 }
-function closeSub() { const s = $('#menu-sub'); if (s) s.remove(); const o = document.querySelector('#menu button.open'); if (o) o.classList.remove('open'); }
-function closeMenu() { closeSub(); const m = $('#menu'); if (m) m.remove(); }
+
+// ---------------------------------------------------------------- the … menu (Spotify's, plus everything Cara)
+function playback() { return now() || {}; }
+function prevTrack() { if (progressNow() > 3000) cmd('seek', 0); else cmd('previous'); }
+function seekBy(ms) { const t = nowTrack(); if (!t) return; const p = Math.max(0, Math.min(t.duration - 1000, progressNow() + ms)); S.state.now.progress = p; S.state.now.stamp = Date.now(); cmd('seek', Math.round(p)); }
+function toggleShuffle() { cmd('shuffle', !playback().shuffle); }
+function cycleRepeat() { const r = playback().repeat || 'off'; cmd('repeat', r === 'off' ? 'context' : r === 'context' ? 'track' : 'off'); }
+function volumeBy(d) {
+  const dev = playback().device; const vol = $('#bar-vol');
+  const v = Math.max(0, Math.min(100, (dev && dev.volume != null ? dev.volume : +vol.value) + d));
+  vol.value = v; paintRange(vol); vol.dataset.t = Date.now(); if (dev) dev.volume = v;
+  api.player('volume', v); toast(`Volume ${v}%`, v ? 'volume' : 'volumeOff');
+}
+function focusSearch() { const q = $('#search-input'); q.focus(); q.select(); }
+function focusFilter() { if (S.ui.libMini) toggleLibrary(); const f = $('#lib-filter'); f.hidden = false; f.focus(); f.select(); }
+function editCmd(c) { try { document.execCommand(c); } catch (e) { /* nothing focused */ } }
+function pasteText() { navigator.clipboard.readText().then(t => document.execCommand('insertText', false, t), () => toast('Press Ctrl+V to paste', 'warning')); }
+async function logOut() { await api.logout(); S.home = null; renderLibrary(); render(); toast('Logged out of Spotify', 'person'); }
+function djTest(what) { ACTIONS['dj-test']({ dataset: { what } }); }
+function djQueue(style) { ACTIONS['dj-queue']({ dataset: { style } }); }
+function mainMenu() {
+  const n = playback(), d = (S.state && S.state.dj) || {}, live = !!d.running;
+  const k = (label, kbd, run, o = {}) => Object.assign({ label, kbd, run }, o);
+  return [
+    { label: 'File', sub: () => [
+      k('New Playlist', 'Ctrl+N', () => askName()), '-',
+      k('Log Out', 'Ctrl+Shift+W', logOut), k('Exit', 'Ctrl+Shift+Q', () => api.quit())] },
+    { label: 'Edit', sub: () => [
+      k('Undo', 'Ctrl+Z', () => editCmd('undo')), k('Redo', 'Ctrl+Y', () => editCmd('redo')), '-',
+      k('Cut', 'Ctrl+X', () => editCmd('cut')), k('Copy', 'Ctrl+C', () => editCmd('copy')), k('Paste', 'Ctrl+V', pasteText), k('Delete', 'Del', () => editCmd('delete')), '-',
+      k('Select All', 'Ctrl+A', () => editCmd('selectAll')), '-',
+      k('Search', 'Ctrl+L', focusSearch), k('Filter', 'Ctrl+F', focusFilter), '-',
+      k('Preferences…', 'Ctrl+P', () => go({ name: 'prefs' }))] },
+    { label: 'View', sub: () => [
+      k('Zoom In', 'Ctrl+=', () => zoomBy(10)), k('Zoom Out', 'Ctrl+-', () => zoomBy(-10)), k('Reset Zoom', 'Ctrl+0', () => setZoom(100)), '-',
+      k('Your Library', '', toggleLibrary, { check: !S.ui.libMini }), k('Now Playing View', '', () => toggleNV('now'), { check: S.ui.nvOpen && S.nv.mode === 'now' }),
+      k('Queue', '', () => toggleNV('queue'), { check: S.ui.nvOpen && S.nv.mode === 'queue' }), '-',
+      k('Full Screen Player', '', () => openNP()), k('Visualizer', 'V', () => Vis.open())] },
+    { label: 'Playback', sub: () => [
+      k(n.playing ? 'Pause' : 'Play', 'Space', () => cmd('toggle')), '-',
+      k('Next', 'Ctrl+Right Arrow', () => cmd('next')), k('Previous', 'Ctrl+Left Arrow', prevTrack),
+      k('Seek Forward', 'Shift+Right Arrow', () => seekBy(5000)), k('Seek Backward', 'Shift+Left Arrow', () => seekBy(-5000)), '-',
+      k('Shuffle', 'Ctrl+S', toggleShuffle, { check: !!n.shuffle }), k('Repeat', 'Ctrl+R', cycleRepeat, { check: (n.repeat || 'off') !== 'off' }), '-',
+      k('Volume Up', 'Ctrl+Up Arrow', () => volumeBy(10)), k('Volume Down', 'Ctrl+Down Arrow', () => volumeBy(-10)), '-',
+      { label: 'Sleep Timer', sub: () => sleepItems().map(x => x === '-' ? x : Object.assign({}, x, { check: false })) },
+      { label: 'Play On', sub: async () => (await deviceItems()).map(x => x === '-' ? x : Object.assign({}, x, { check: !!x.on })) }] },
+    { label: 'Cara', sub: () => [
+      k(live ? 'End Her Show' : 'Go Live', '', () => ACTIONS['dj-toggle'](), { check: live }), '-',
+      k('Talk Now', '', () => djTest('talk'), { disabled: !live }), k('Pop In Now', '', () => djTest('popin'), { disabled: !live }),
+      k('Cara and Scratch Now', '', () => djTest('duo'), { disabled: !live }), k('Breaking News Now', '', () => djTest('break'), { disabled: !live }),
+      k('Stinger Now', '', () => djTest('stinger'), { disabled: !live }), '-',
+      { label: 'Her Next Break Starts', sub: () => [['talkover', 'Talking Over the End'], ['intro', 'Over the Next Intro'], ['silent', 'Silent'], ['fadeout', 'Fading the Song Out']].map(([v, l]) => k(l, '', () => djQueue(v), { check: d.queued === v })) }, '-',
+      k("Cara's Studio…", '', () => go({ name: 'cara' })), k('Visualizer', 'V', () => Vis.open())] },
+    { label: 'Help', sub: () => [
+      k('Spotify Help', 'F1', () => api.open_url('https://support.spotify.com/')), k('Spotify Community', '', () => api.open_url('https://community.spotify.com/')),
+      k('Your Account', '', () => api.open_url('https://www.spotify.com/account/overview/')), '-',
+      k('Third-party Software', '', thirdPartySheet), { label: 'Troubleshooting', sub: () => [
+        k('Activity Log', '', () => go({ name: 'cara', focusLog: true })), k('Start the Built-in Player Over', '', () => ACTIONS['player-retry']()),
+        k('Show the Welcome Setup', '', () => showWelcome(true))] }, '-',
+      k('About Non Stop Pop DJ', '', aboutSheet)] },
+  ];
+}
+function openMainMenu() {
+  const b = $('#tb-menu');
+  if ($('#menu') && b.classList.contains('open')) return closeMenu();
+  const r = b.getBoundingClientRect();
+  showMenu(mainMenu(), r.left, r.bottom + 6, { plain: true });
+  b.classList.add('open');
+}
+function accountMenu() {
+  const r = $('#tb-me').getBoundingClientRect(), me = S.state && S.state.me;
+  const items = [{ head: me ? me.name : 'Account' },
+    { label: 'Account', icon: 'open', run: () => api.open_url('https://www.spotify.com/account/overview/') },
+    { label: 'Profile', icon: 'person', disabled: !(me && me.id), run: () => api.open_url(`https://open.spotify.com/user/${me.id}`) },
+    { label: 'Settings', icon: 'settings', run: () => go({ name: 'prefs' }) }, '-',
+    S.state && S.state.connected ? { label: 'Log out', icon: 'close', run: logOut } : { label: 'Connect Spotify', icon: 'link', run: () => ACTIONS.connect() }];
+  showMenu(items, r.right - 240, r.bottom + 6);
+}
+function aboutSheet() {
+  sheet('About Non Stop Pop DJ', `<div class="pick-row" style="cursor:default"><div class="art liked-art" style="width:56px;height:56px;border-radius:14px;background:var(--cara)">${bars(true)}</div>
+    <div class="ell"><b>Non Stop Pop DJ ${esc((S.boot && S.boot.version) || '')}</b><small class="muted">Your music on Spotify, with Cara on the radio.</small></div></div>
+    <p class="muted">Music comes from Spotify. Lyrics from LRCLIB, credits from MusicBrainz, music videos and tours from Wikidata (videos play from YouTube). Your keys are saved on this PC only.</p>
+    <div class="sheet-buttons"><button class="pill primary" data-act="sheet-close">Done</button></div>`);
+}
+function thirdPartySheet() {
+  const rows = [['Spotify Web API and Web Playback SDK', 'Spotify'], ['pywebview', 'BSD'], ['pygame', 'LGPL'], ['spotipy', 'MIT'], ['NumPy', 'BSD'], ['SoundCard', 'BSD'],
+    ['Butterchurn', 'MIT'], ['MilkDrop presets', 'see the presets folder'], ['HLSL parser', 'MIT'], ['Material Design Icons', 'Apache 2.0'],
+    ['MusicBrainz data', 'CC0'], ['Wikidata', 'CC0'], ['LRCLIB lyrics', 'LRCLIB'], ['YouTube embedded player', 'YouTube']];
+  sheet('Third-party Software', `<div class="credits">${rows.map(([n, l]) => `<div class="credit"><div class="caps">${esc(l)}</div><div>${esc(n)}</div></div>`).join('')}</div>`);
+}
 function trackMenu(uri, x, y) {
   const t = S.tracks.get(uri) || (nowUri() === uri ? nowTrack() : null); if (!t) return;
   const liked = S.liked.get(uri) || (nowUri() === uri && now().liked);
@@ -920,7 +1278,8 @@ function askName() {
     input.addEventListener('keydown', e => { if (e.key === 'Enter') done(true); });
   });
 }
-async function devicesMenu(x, y) {
+async function devicesMenu(x, y) { showMenu([{ head: 'Play on' }, ...(await deviceItems())], x, y); }
+async function deviceItems() {
   const list = await api.devices();
   const devs = Array.isArray(list) ? list : [];
   const st = S.state || {};
@@ -930,7 +1289,7 @@ async function devicesMenu(x, y) {
   const pc = ((S.boot && S.boot.pc) || '').toLowerCase();
   const mine = d => (pl.deviceId && d.id === pl.deviceId) || d.name === (pl.name || 'Non Stop Pop DJ');
   const playingHere = devs.some(d => mine(d) && d.active);
-  const items = [{ head: 'Play on' }];
+  const items = [];
   // this PC, through the app's own player, is always there (it plays on whatever Windows plays sound on)
   const why = playingHere ? '  (playing)' : pl.status === 'premium' ? '  (needs Premium)' : pl.mode === 'app' && pl.status === 'starting' ? '  (starting…)' : '';
   items.push({ label: `${out} · this PC${why}`, icon: outIcon, on: playingHere, run: async () => {
@@ -946,7 +1305,7 @@ async function devicesMenu(x, y) {
     items.push({ label: (onPc ? 'Spotify app on this PC' : d.name) + (d.active ? '  (playing)' : ''), icon: d.type === 'computer' ? 'computer' : d.type === 'smartphone' ? 'phone' : 'speaker', on: d.active, run: async () => { if (!d.restricted) { await api.transfer(d.id); toast(`Playing on ${onPc ? 'the Spotify app' : d.name}`, 'speaker'); poke(); } } });
   }
   items.push('-', { label: 'Join a Jam…', icon: 'people', run: () => joinJamSheet() }, { label: `Cara's voice: ${out}`, icon: 'mic', run: () => {} });
-  showMenu(items, x, y);
+  return items;
 }
 function sleepItems() {
   const s = S.state && S.state.sleep;
@@ -958,56 +1317,62 @@ function sleepItems() {
 function sleepMenu(x, y) { showMenu([{ head: 'Sleep timer' }, ...sleepItems()], x, y); }
 
 // ---------------------------------------------------------------- Settings
-function settingsSheet() {
-  const c = S.config, s = S.state || {}, me = s.me;
-  const field = (label, key, o = {}) => `<div class="field"><label>${esc(label)}</label><div class="box"><input data-key="${key}" type="${o.secret ? 'password' : 'text'}" value="${esc(c[key] || '')}" placeholder="${esc(o.ph || '')}" spellcheck="false" autocomplete="off">${o.secret ? `<button class="icon-btn" data-reveal title="Show">${icon('eye', 18)}</button>` : ''}</div>${o.hint ? `<div class="hint">${o.hint}</div>` : ''}</div>`;
-  const w = sheet('Settings', `
-    <div class="group"><div class="account-row"><div class="avatar" style="${me && me.image ? `background-image:url('${esc(me.image)}')` : ''}">${me && me.image ? '' : icon('person', 24)}</div>
-      <div class="ell" style="flex:1"><b class="ell">${esc(me ? me.name : s.connected ? 'Connected' : 'Not connected')}</b><span class="muted">${s.connected ? 'Spotify connected' : s.connecting ? 'Connecting…' : 'Spotify not connected'}</span></div>
-      <button class="pill secondary small" data-set="reconnect">Reconnect</button>${s.connected ? '<button class="pill secondary small" data-set="logout">Log out</button>' : ''}</div></div>
-    <div class="group"><div class="caps">Where your music plays</div>
-      <div class="seg">${[['app', 'This app'], ['spotify', 'Spotify app']].map(([v, l]) => `<button class="${(c.player || 'app') === v ? 'on' : ''}" data-player="${v}">${l}</button>`).join('')}</div>
-      <div class="note">${(c.player || 'app') === 'app'
-        ? `Music plays right here, no Spotify app needed (Spotify Premium only). ${esc(playerNote(s.player))}`
-        : 'Music plays in the Spotify app, on this PC or any other device, and this app controls it.'}</div></div>
-    <div class="group"><div class="caps">Spotify app</div>
-      ${field('Client ID', 'spotify_client_id', { ph: 'Paste it here' })}
-      ${field('Client Secret', 'spotify_client_secret', { secret: true, ph: 'Paste it here' })}
-      <div class="note">From <button class="link" data-set="dashboard">developer.spotify.com/dashboard</button>. Its Redirect URI must be <b class="num" style="color:#fff">${esc(S.boot.redirect)}</b> <button class="link" data-set="copy-redirect">Copy</button>, and everyone who uses it has to be added under User Management.</div></div>
-    <div class="group"><div class="caps">Her voice</div>
-      <div class="field"><label>Voice engine</label><div class="box"><select data-key="tts_engine">${[['elevenlabs', 'ElevenLabs (her real voice)'], ['gemini', 'Gemini voice'], ['edge', 'Microsoft voice (free, no key)']].map(([v, l]) => `<option value="${v}" ${c.tts_engine === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
-      ${field('ElevenLabs API key', 'elevenlabs_api_key', { secret: true, ph: 'sk_…' })}
-      ${field('Cara\'s Voice ID', 'elevenlabs_voice_id', { ph: 'Voice ID' })}
-      <div class="field"><label>Model</label><div class="box"><select data-key="eleven_model">${[['eleven_v4', 'Eleven v4 (most expressive)'], ['eleven_v4_turbo', 'Eleven v4 Turbo (faster)'], ['eleven_multilingual_v2', 'Multilingual v2 (older)']].map(([v, l]) => `<option value="${v}" ${c.eleven_model === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div></div>
-    <div class="group"><div class="caps">Scratch's voice (co-host)</div>
-      ${field("Scratch's Voice ID", 'cohost_voice', { ph: 'Leave blank for a deep, warm radio voice', hint: 'Add any voice from the ElevenLabs Voice Library to My Voices and paste its ID here.' })}</div>
-    <div class="group"><div class="caps">Station voice (stingers)</div>
-      ${field('Station Voice ID', 'station_voice', { ph: 'Leave blank for the default announcer', hint: 'The announcer on your station stingers. Add any voice from the ElevenLabs Voice Library to My Voices, then paste its ID here.' })}</div>
-    <div class="group"><div class="caps">Her words (Gemini)</div>
-      ${field('Gemini API key', 'gemini_api_key', { secret: true, ph: 'Paste it here', hint: 'A free key from <button class="link" data-set="aistudio">Google AI Studio</button>. Without one she still talks, with simpler lines.' })}</div>
-    <div class="group"><div class="caps">Your town</div>${field('Town', 'city', { ph: 'Yakima, Washington', hint: 'Town, State. For local news and weather.' })}</div>
-    <div class="group"><button class="pill secondary" data-set="welcome">Show the welcome setup again</button>
-      <div class="note">Non Stop Pop DJ ${esc(S.boot.version)}. Music plays through the Spotify app; Cara talks over it from here. Your keys are saved on this PC only.</div></div>`, true);
-  w.addEventListener('change', async e => {
-    const el = e.target.closest('[data-key]'); if (!el) return;
-    const res = await api.set_config({ [el.dataset.key]: el.value });
-    if (res && res.config) { S.config = res.config; toast('Saved', 'check'); if (res.reconnect) api.connect(true); }
-  });
-  w.addEventListener('click', async e => {
-    const rv = e.target.closest('[data-reveal]'); if (rv) { const i = rv.parentElement.querySelector('input'); i.type = i.type === 'password' ? 'text' : 'password'; return; }
-    const pb = e.target.closest('[data-player]');
-    if (pb) { await setConfig({ player: pb.dataset.player }); closeSheet(); settingsSheet(); return; }
-    const b = e.target.closest('[data-set]'); if (!b) return;
-    const what = b.dataset.set;
-    if (what === 'reconnect') { await api.connect(true); toast('A browser tab opens: click Agree', 'link'); closeSheet(); }
-    if (what === 'logout') { await api.logout(); S.home = null; closeSheet(); render(); toast('Logged out of Spotify', 'person'); }
-    if (what === 'dashboard') api.open_url('https://developer.spotify.com/dashboard');
-    if (what === 'aistudio') api.open_url('https://aistudio.google.com/apikey');
-    if (what === 'copy-redirect') copy(S.boot.redirect);
-    if (what === 'welcome') { closeSheet(); showWelcome(true); }
-  });
-}
-
+// Settings, laid out like Spotify's: this app's own settings, Cara's voices among them
+VIEWS.prefs = {
+  title: () => 'Settings',
+  html: () => {
+    const c = S.config, s = S.state || {}, me = s.me, u = S.ui, pl = s.player || {};
+    const tog = (on, attrs) => `<button class="toggle ${on ? 'on' : ''}" ${attrs} aria-pressed="${!!on}"></button>`;
+    const sel = (key, opts) => `<select data-pref="${key}">${opts.map(([v, l]) => `<option value="${v}" ${String(c[key]) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+    const txt = (key, ph, secret) => secret
+      ? `<div class="secret"><input type="password" data-pref="${key}" value="${esc(c[key] || '')}" placeholder="${esc(ph)}" spellcheck="false" autocomplete="off"><button class="icon-btn" data-act="reveal" title="Show">${icon('eye', 18)}</button></div>`
+      : `<input type="text" data-pref="${key}" value="${esc(c[key] || '')}" placeholder="${esc(ph)}" spellcheck="false" autocomplete="off">`;
+    const row = (label, sub, ctl) => `<div class="pref"><div class="lbl">${label}${sub ? `<small>${sub}</small>` : ''}</div><div class="ctl">${ctl}</div></div>`;
+    const out = (s.output || '').split(' (')[0] || 'your speakers';
+    return `<div class="prefs"><h1>Settings</h1>
+      <section><h2>Account</h2>
+        <div class="account"><div class="avatar" style="${me && me.image ? `background-image:url('${esc(me.image)}')` : ''}">${me && me.image ? '' : icon('person', 26)}</div>
+          <div class="who"><b class="ell">${esc(me ? me.name : 'Not connected')}</b><span class="muted">${s.connected ? 'Spotify connected' : s.connecting ? 'Connecting…' : 'Spotify not connected'}</span></div>
+          <button class="pill secondary small" data-act="pref-reconnect">Reconnect</button>${s.connected ? '<button class="pill secondary small" data-act="pref-logout">Log out</button>' : ''}</div>
+        ${row('Edit login methods', '', `<button class="pill secondary small" data-act="open-url" data-url="https://www.spotify.com/account/overview/">Edit ${icon('open', 14)}</button>`)}
+      </section>
+      <section><h2>Spotify developer app</h2>
+        ${row('Client ID', '', txt('spotify_client_id', 'Paste it here'))}
+        ${row('Client Secret', '', txt('spotify_client_secret', 'Paste it here', true))}
+        <div class="note">From <button class="link" data-act="open-url" data-url="https://developer.spotify.com/dashboard">developer.spotify.com/dashboard</button>. Its Redirect URI must be <b class="num">${esc(S.boot.redirect)}</b> <button class="link" data-act="copy-redirect">Copy</button>, and everyone who uses it has to be added under User Management.</div>
+      </section>
+      <section><h2>Audio</h2>
+        ${row('Where your music plays', (c.player || 'app') === 'app' ? `Right here in this app, through ${esc(out)} (Spotify Premium). ${esc(playerNote(pl))}` : 'In the Spotify app, on this PC or any device, with this app as the remote.',
+          `<div class="seg">${[['app', 'This app'], ['spotify', 'Spotify app']].map(([v, l]) => `<button class="${(c.player || 'app') === v ? 'on' : ''}" data-act="player-mode" data-mode="${v}">${l}</button>`).join('')}</div>`)}
+      </section>
+      <section><h2>Display</h2>
+        ${row('Show the now-playing panel on click of play', '', tog(u.npOnPlay, 'data-act="ui-toggle" data-key="npOnPlay"'))}
+        ${row('Show Your Library', 'Off folds it into a narrow strip of covers.', tog(!u.libMini, 'data-act="ui-toggle" data-key="libMini"'))}
+      </section>
+      <section><h2>Zoom level</h2>
+        <div class="pref stack"><div class="lbl">Adjusting the zoom level can help you make the most of the app. You can also press Ctrl - or Ctrl +.</div></div>
+        <div class="zoom-box"><div class="zoom-steps">${[70, 80, 90, 100, 110, 120, 130].map(z => `<button class="${(u.zoom || 100) === z ? 'on' : ''}" data-act="zoom" data-z="${z}"><i></i>${z}%</button>`).join('')}</div></div>
+      </section>
+      <section><h2>Cara's voice</h2>
+        ${row('Voice engine', '', sel('tts_engine', [['elevenlabs', 'ElevenLabs (her real voice)'], ['gemini', 'Gemini voice'], ['edge', 'Microsoft voice (free, no key)']]))}
+        ${row('ElevenLabs API key', 'The secret key that starts with sk_.', txt('elevenlabs_api_key', 'sk_…', true))}
+        ${row("Cara's Voice ID", '', txt('elevenlabs_voice_id', 'Voice ID'))}
+        ${row('Model', '', sel('eleven_model', [['eleven_v4', 'Eleven v4 (most expressive)'], ['eleven_v4_turbo', 'Eleven v4 Turbo (faster)'], ['eleven_multilingual_v2', 'Multilingual v2 (older)']]))}
+        ${row("MC Scratch's Voice ID", 'Leave blank for a deep, warm radio voice.', txt('cohost_voice', 'Voice ID'))}
+        ${row('Station voice (stingers)', 'The announcer on your station stingers. Leave blank for the default.', txt('station_voice', 'Voice ID'))}
+        <div class="note">Add any voice from the ElevenLabs Voice Library to My Voices, then paste its ID here.</div>
+      </section>
+      <section><h2>Cara's words</h2>
+        ${row('Gemini API key', `A free key from <button class="link" data-act="open-url" data-url="https://aistudio.google.com/apikey">Google AI Studio</button>. Without one she still talks, with simpler lines.`, txt('gemini_api_key', 'Paste it here', true))}
+        ${row("Cara's town", 'Town, State. For local news and weather.', txt('city', 'Yakima, Washington'))}
+        ${row("Cara's studio", 'Her show: mood, how often she talks, pop-ins, Scratch, stingers and more.', `<button class="pill secondary small" data-act="open-cara">Open</button>`)}
+      </section>
+      <section><h2>About</h2>
+        ${row(`Non Stop Pop DJ ${esc(S.boot.version)}`, 'Your keys are saved on this PC only.', `<button class="pill secondary small" data-act="welcome-again">Welcome setup</button>`)}
+      </section></div>`;
+  },
+};
+function settingsSheet() { go({ name: 'prefs' }); }
 function playerNote(p) {
   p = p || {};
   if (p.status === 'ready') return `Ready (it runs in an off-screen ${p.browser || 'Chrome'} window).`;
@@ -1064,26 +1429,45 @@ const ACTIONS = {
     else if (r === 'stopping') toast('Cara is signing off', 'stop');
     poke();
   },
-  'dj-test': async el => { const r = await api.dj_test(el.dataset.what); if (typeof r === 'string' && r.startsWith('making:')) toast(`Making a ${r.slice(7)} stinger…`, 'bolt'); else if (r !== 'ok') toast(r, 'warning'); else toast({ popin: 'Cara pops in now', duo: 'Cara and Scratch, coming up', stinger: 'Stinger!', break: 'Breaking news, coming up' }[el.dataset.what] || 'OK', 'bolt'); },
+  'dj-test': async el => { const r = await api.dj_test(el.dataset.what); if (typeof r === 'string' && r.startsWith('making:')) toast(`Making a ${r.slice(7)} stinger…`, 'bolt'); else if (r !== 'ok') toast(r, 'warning'); else toast({ popin: 'Cara pops in now', duo: 'Cara and Scratch, coming up', stinger: 'Stinger!', break: 'Breaking news, coming up', talk: 'Cara talks at the end of this song' }[el.dataset.what] || 'OK', 'bolt'); },
   'dj-queue': async el => { const r = await api.dj_queue(el.dataset.style); if (r !== 'ok') toast(r, 'warning'); poke(); },
   'cfg': el => setConfig({ [el.dataset.key]: el.dataset.val }),
   'cfg-toggle': el => setConfig({ [el.dataset.key]: !S.config[el.dataset.key] }),
   'cfg-step': el => { const k = el.dataset.key; const v = Math.max(+el.dataset.min, Math.min(+el.dataset.max, (+S.config[k] || 0) + +el.dataset.step)); const patch = { [k]: v }; if (k === 'break_min' && v > S.config.break_max) patch.break_max = v; if (k === 'break_max' && v < S.config.break_min) patch.break_min = v; setConfig(patch); },
   'set-town': () => { const v = $('#town').value.trim(); if (v) setConfig({ city: v }).then(() => toast(`Cara's town: ${v}`, 'place')); },
   'search-term': el => { S.search.q = el.dataset.q; S.search.scope = 'all'; refresh(); runSearch(); },
-  'search-clear': () => { S.search.q = ''; S.search.results = null; S.route.focus = true; refresh(); },
+  'search-clear': () => { S.search.q = ''; S.search.results = null; $('#search-input').value = ''; $('#tb-clear').hidden = true; $('#search-input').focus(); if (S.route.name === 'search') refresh(); },
   'search-forget': async () => { await api.clear_searches(); S.config.recent_searches = []; refresh(); },
   'search-scope': el => { S.search.scope = el.dataset.scope; if (S.route.name !== 'search') tab('search'); runSearch(); },
   'lyric': el => { api.player('seek', +el.dataset.t); S.state.now.progress = +el.dataset.t; S.state.now.stamp = Date.now(); S.np.userScrolled = false; },
   'vis-open': () => Vis.open(),
   'player-mode': el => setConfig({ player: el.dataset.mode }).then(() => toast(el.dataset.mode === 'app' ? 'Music plays in this app' : 'Music plays in the Spotify app', 'speaker')),
   'player-retry': () => api.player_retry().then(() => toast('Starting the built-in player', 'speaker')),
+  'home': () => { S.homeKind = 'all'; tab('home'); },
+  'home-kind': el => { S.homeKind = el.dataset.kind; refresh(); },
+  'browse': () => { S.search.q = ''; S.search.results = null; $('#search-input').value = ''; if (S.route.name !== 'search') tab('search'); else refresh(); },
+  'lib-collapse': () => toggleLibrary(),
+  'lib-kind': el => { S.ui.libKind = el.dataset.kind; saveUi(); renderLibrary(); },
+  'lib-find': () => { const f = $('#lib-filter'); f.hidden = !f.hidden; if (!f.hidden) f.focus(); else { f.value = ''; S.libQuery = ''; renderLibrary(); } },
+  'lib-sort': el => { const r = el.getBoundingClientRect(); libSortMenu(r.left - 60, r.bottom + 4); },
+  'open-cara': () => go({ name: 'cara' }),
+  'nv-lyrics': () => openNP('lyrics'),
+  'nv-credits': () => { const t = nowTrack(); if (t) creditsSheet(t); },
+  'nv-queue': () => openNV('queue'),
+  'nv-video': async el => { const t = nowTrack(); const r = await api.play_named(el.dataset.title, t ? t.artist : ''); if (r !== 'ok') toast(typeof r === 'string' ? r : "Couldn't play that.", 'warning'); poke(); },
+  'reveal': el => { const i = el.parentElement.querySelector('input'); i.type = i.type === 'password' ? 'text' : 'password'; },
+  'pref-reconnect': async () => { await api.connect(true); toast('A browser tab opens: click Agree', 'link'); },
+  'pref-logout': () => logOut(),
+  'copy-redirect': () => copy(S.boot.redirect),
+  'welcome-again': () => showWelcome(true),
+  'ui-toggle': el => { const k = el.dataset.key; S.ui[k] = !S.ui[k]; saveUi(); applyUi(); refresh(); },
+  'zoom': el => setZoom(+el.dataset.z),
 };
 async function setConfig(patch) {
   Object.assign(S.config, patch);
-  if (S.route.name === 'cara') refresh();
+  if (S.route.name === 'cara' || S.route.name === 'prefs') refresh();
   const res = await api.set_config(patch);
-  if (res && res.config) { S.config = res.config; if (S.route.name === 'cara') refresh(); }
+  if (res && res.config) { S.config = res.config; if (S.route.name === 'cara' || S.route.name === 'prefs') refresh(); }
 }
 function poke() { setTimeout(pollOnce, 250); }
 // play/pause/skip and friends: says so when it didn't work, then refreshes
@@ -1096,7 +1480,7 @@ function cmd(action, value) {
 }
 
 document.addEventListener('click', e => {
-  if (!e.target.closest('#menu, #menu-sub')) closeMenu();
+  if (!e.target.closest('.menu, #tb-menu')) closeMenu();
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
   const f = ACTIONS[el.dataset.act];
@@ -1116,25 +1500,55 @@ document.addEventListener('input', e => {
   if (el.type === 'range') paintRange(el);
   if (el.id === 'search-input') {
     S.search.q = el.value;
+    $('#tb-clear').hidden = !el.value;
+    if (S.route.name !== 'search') { go({ name: 'search', tab: 'search' }); el.focus(); }
     clearTimeout(S.search.timer);
-    S.search.timer = setTimeout(() => { if (S.search.q.trim()) runSearch(); else { S.search.results = null; refresh(); $('#search-input').focus(); } }, 320);
+    S.search.timer = setTimeout(() => { if (S.search.q.trim()) runSearch(); else { S.search.results = null; refresh(); } }, 300);
   }
+  if (el.id === 'lib-filter') { S.libQuery = el.value; renderLibrary(); }
 });
-document.addEventListener('change', e => {
+document.addEventListener('change', async e => {
   const el = e.target;
   if (el.type === 'range' && el.dataset.key) setConfig({ [el.dataset.key]: +el.value });
+  if (el.dataset.pref) {
+    const res = await api.set_config({ [el.dataset.pref]: el.value });
+    if (res && res.config) { S.config = res.config; toast('Saved', 'check'); if (res.reconnect) api.connect(true); }
+  }
 });
+// Spotify's keyboard shortcuts (they also keep the browser's own Ctrl+R reload, Ctrl+P print and Ctrl+S save away)
 document.addEventListener('keydown', e => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement && document.activeElement.tagName);
-  if (e.key === 'Escape') { if ($('#menu')) return closeMenu(); if ($('#sheet-wrap')) return closeSheet(); if (Vis.isOpen) return Vis.close(); if (S.np.open) return closeNP(); }
-  if (typing) { if (e.key === 'Enter' && e.target.id === 'search-input' && S.search.q.trim()) api.remember_search(S.search.q).then(l => { if (Array.isArray(l)) S.config.recent_searches = l; }); return; }
-  if (e.key === ' ') { e.preventDefault(); cmd('toggle'); }
-  else if (e.key === 'ArrowRight' && e.ctrlKey) cmd('next');
-  else if (e.key === 'ArrowLeft' && e.ctrlKey) cmd('previous');
-  else if (e.key === 'ArrowLeft' && e.altKey) goBack();
-  else if (e.key === 'ArrowRight' && e.altKey) goForward();
-  else if (e.key.toLowerCase() === 'v' && !e.ctrlKey) Vis.isOpen ? Vis.close() : Vis.open();
-  else if ((e.key === 'f' && e.ctrlKey) || e.key === '/') { e.preventDefault(); S.route.focus = true; if (S.route.name !== 'search') tab('search'); else afterRender(); }
+  const ctrl = e.ctrlKey || e.metaKey, key = e.key, low = key.length === 1 ? key.toLowerCase() : key;
+  if (key === 'Escape') {
+    if ($('#menu')) return closeMenu(); if ($('#sheet-wrap')) return closeSheet(); if (Vis.isOpen) return Vis.close(); if (S.np.open) return closeNP();
+    if (typing) { document.activeElement.blur(); return; }
+  }
+  const hot = fn => { e.preventDefault(); e.stopPropagation(); fn(); };
+  if (key === 'F5' || (ctrl && e.shiftKey && low === 'r')) return e.preventDefault();
+  if (key === 'F1') return hot(() => api.open_url('https://support.spotify.com/'));
+  if (ctrl && e.shiftKey && low === 'q') return hot(() => api.quit());
+  if (ctrl && e.shiftKey && low === 'w') return hot(logOut);
+  if (ctrl && !e.shiftKey && low === 'n') return hot(() => askName());
+  if (ctrl && !e.shiftKey && low === 'l') return hot(focusSearch);
+  if (ctrl && !e.shiftKey && low === 'f') return hot(focusFilter);
+  if (ctrl && !e.shiftKey && low === 'p') return hot(() => go({ name: 'prefs' }));
+  if (ctrl && (key === '=' || key === '+')) return hot(() => zoomBy(10));
+  if (ctrl && (key === '-' || key === '_')) return hot(() => zoomBy(-10));
+  if (ctrl && key === '0') return hot(() => setZoom(100));
+  if (ctrl && !e.shiftKey && low === 'r') return hot(() => { if (!typing) cycleRepeat(); });
+  if (ctrl && !e.shiftKey && low === 's') return hot(() => { if (!typing) toggleShuffle(); });
+  if (typing) { if (key === 'Enter' && e.target.id === 'search-input' && S.search.q.trim()) api.remember_search(S.search.q).then(l => { if (Array.isArray(l)) S.config.recent_searches = l; }); return; }
+  if (key === ' ') { e.preventDefault(); cmd('toggle'); }
+  else if (ctrl && key === 'ArrowRight') { e.preventDefault(); cmd('next'); }
+  else if (ctrl && key === 'ArrowLeft') { e.preventDefault(); prevTrack(); }
+  else if (ctrl && key === 'ArrowUp') { e.preventDefault(); volumeBy(10); }
+  else if (ctrl && key === 'ArrowDown') { e.preventDefault(); volumeBy(-10); }
+  else if (e.shiftKey && key === 'ArrowRight') { e.preventDefault(); seekBy(5000); }
+  else if (e.shiftKey && key === 'ArrowLeft') { e.preventDefault(); seekBy(-5000); }
+  else if (key === 'ArrowLeft' && e.altKey) goBack();
+  else if (key === 'ArrowRight' && e.altKey) goForward();
+  else if (low === 'v' && !ctrl && !e.altKey) Vis.isOpen ? Vis.close() : Vis.open();
+  else if (key === '/') { e.preventDefault(); focusSearch(); }
 });
 document.addEventListener('mousedown', e => { if (e.button === 3) goBack(); if (e.button === 4) goForward(); });
 
@@ -1155,10 +1569,12 @@ async function pollOnce() {
     if (was !== null) render();
   }
   updateBar(); updateHero(); updateNP();
-  if (nowUri() !== prevUri) { markNow(); if (S.np.open) loadNPTab(); ambient(); }
+  if (nowUri() !== prevUri) { markNow(); if (S.np.open) loadNPTab(); ambient(); if (S.ui.nvOpen) nvRender(); }
+  if ((s.now && s.now.context) !== S.lastCtx) { S.lastCtx = s.now && s.now.context; renderLibrary(); }
   else if (s.now && S.lastPlaying !== s.now.playing) markNow();
   S.lastPlaying = s.now && s.now.playing;
   if (S.route.name === 'home' || S.route.name === 'cara') { const b = $('.banner'); const want = banners(); if ((b ? b.outerHTML : '') !== want && !!b !== !!want) refresh(); }
+  if (S.ui.nvOpen && S.nv.mode === 'queue' && nowUri() !== S.nv.qUri) { S.nv.qUri = nowUri(); nvQueue(false); }
   Vis.update(s);
   if (s.logCount !== S.logNext) pollLog();
 }
@@ -1180,6 +1596,18 @@ function ambient() {
   const next = layers.find(l => !l.classList.contains('on')) || layers[0];
   if (url) { const img = new Image(); img.onload = () => { next.style.backgroundImage = `url('${url}')`; layers.forEach(l => l.classList.toggle('on', l === next)); }; img.src = url; }
   else layers.forEach(l => l.classList.remove('on'));
+}
+
+// ---------------------------------------------------------------- resizing the panes
+function wireDrag(el, key, dir) {
+  el.addEventListener('pointerdown', e => {
+    if (key === 'libW' && S.ui.libMini) return;
+    el.setPointerCapture(e.pointerId); el.classList.add('on'); document.body.classList.add('dragging');
+    const x0 = e.clientX, w0 = S.ui[key];
+    const move = ev => { S.ui[key] = w0 + dir * (ev.clientX - x0) / zf(); applyUi(); };
+    const up = () => { el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.classList.remove('on'); document.body.classList.remove('dragging'); saveUi(); };
+    el.addEventListener('pointermove', move); el.addEventListener('pointerup', up);
+  });
 }
 
 // ---------------------------------------------------------------- the welcome
@@ -1266,9 +1694,20 @@ async function start() {
   S.config = S.boot.config || {};
   wireSeek($('#bar-seek')); wireSeek($('#np-seek'));
   $('#scroller').addEventListener('scroll', () => {
-    $('#topbar').classList.toggle('solid', $('#scroller').scrollTop > 40);
+    $('#main-head').classList.toggle('solid', $('#scroller').scrollTop > 60);
     loadMore();
   }, { passive: true });
+  applyUi();
+  $('#lib-list').addEventListener('scroll', loadLibMore, { passive: true });
+  $('#tb-menu').addEventListener('mousedown', e => e.preventDefault());
+  $('#tb-menu').addEventListener('click', e => { e.stopPropagation(); openMainMenu(); });
+  $('#tb-me').addEventListener('click', e => { e.stopPropagation(); accountMenu(); });
+  $('#nv-close').addEventListener('click', () => { S.ui.nvOpen = false; saveUi(); applyUi(); nvStopVideo(); updateBar(); });
+  $('#nv-more').addEventListener('click', e => { e.stopPropagation(); const t = nowTrack(); const r = e.currentTarget.getBoundingClientRect(); if (t) trackMenu(t.uri, r.left - 220, r.bottom + 6); });
+  $('#playing-on').addEventListener('click', e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); devicesMenu(r.right - 300, r.top - 280); });
+  $('#lib-filter').addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); ACTIONS['lib-find'](); } });
+  wireDrag($('#drag-l'), 'libW', 1); wireDrag($('#drag-r'), 'nvW', -1);
+  $('#drag-l').addEventListener('dblclick', toggleLibrary);
   $('#np-panel').addEventListener('wheel', () => { S.np.userScrolled = true; clearTimeout(S.np.usTimer); S.np.usTimer = setTimeout(() => { S.np.userScrolled = false; }, 4000); }, { passive: true });
   const vol = $('#bar-vol');
   vol.addEventListener('change', () => { vol.dataset.t = Date.now(); api.player('volume', +vol.value); });
@@ -1282,24 +1721,23 @@ async function start() {
     $(`#${p}-repeat`).addEventListener('click', () => { const r = (now() && now().repeat) || 'off'; cmd('repeat', r === 'off' ? 'context' : r === 'context' ? 'track' : 'off'); });
     $(`#${p}-like`).addEventListener('click', () => { const t = nowTrack(); if (t) toggleLike(t.uri); });
   }
-  $('#bar-art').addEventListener('click', () => openNP());
+  $('#bar-art').addEventListener('click', () => toggleNV('now'));
+  $('#bar-nv').addEventListener('click', () => toggleNV('now'));
   $('#bar-title').addEventListener('click', () => { const t = nowTrack(); if (t && t.albumId) go({ name: 'album', id: t.albumId }); });
-  $('#bar-lyrics').addEventListener('click', () => S.np.open && S.np.tab === 'lyrics' ? closeNP() : openNP('lyrics'));
-  $('#bar-queue').addEventListener('click', () => S.np.open && S.np.tab === 'queue' ? closeNP() : openNP('queue'));
+  $('#bar-lyrics').addEventListener('click', () => { S.np.open && S.np.tab === 'lyrics' ? closeNP() : openNP('lyrics'); updateBar(); });
+  $('#bar-queue').addEventListener('click', () => toggleNV('queue'));
   $('#bar-dev').addEventListener('click', e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); devicesMenu(r.left - 120, r.top - 220); });
-  $('#bar-sleep').addEventListener('click', e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); sleepMenu(r.left - 120, r.top - 250); });
   $('#bar-vis').addEventListener('click', () => Vis.open());
   $('#bar-expand').addEventListener('click', () => S.np.open ? closeNP() : openNP());
-  $('#dj-btn').addEventListener('click', () => ACTIONS['dj-toggle']());
   $('#np-close').addEventListener('click', closeNP);
-  $('#np-dj').addEventListener('click', () => ACTIONS['dj-toggle']());
   $('#np-vis').addEventListener('click', () => Vis.open());
   $('#np-sleep').addEventListener('click', e => { e.stopPropagation(); const r = e.currentTarget.getBoundingClientRect(); sleepMenu(r.left - 190, r.bottom + 8); });
   $('#np-more').addEventListener('click', e => { e.stopPropagation(); const t = nowTrack(); const r = e.currentTarget.getBoundingClientRect(); if (t) trackMenu(t.uri, r.left - 180, r.bottom + 6); });
   $$('#np .tabs .chip').forEach(c => c.addEventListener('click', () => { S.np.tab = c.dataset.tab; S.np.userScrolled = false; updateNP(); loadNPTab(); }));
   $('#np-device').addEventListener('click', e => { e.stopPropagation(); devicesMenu(e.clientX, e.clientY - 200); });
-  renderSidebar(); updateBar(); updateHero();
+  renderLibrary(); updateBar(); updateHero();
   render(true);
+  if (S.ui.nvOpen) nvRender(true);
   requestAnimationFrame(tickProgress);
   pollLoop();
   if (!S.config.welcomed) showWelcome();
