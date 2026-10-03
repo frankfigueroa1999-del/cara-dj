@@ -22,7 +22,7 @@ in vec2 vUv;
 out vec4 fragColor;
 uniform sampler2D uPrev, uWave, uSpec;
 uniform vec2 uRes;
-uniform float uTime, uBass, uMid, uTreb, uVol, uBeat, uBeats, uFade, uHue, uSeed, uEnergy;
+uniform float uTime, uBass, uMid, uTreb, uVol, uBeat, uBeats, uFade, uHue, uSeed, uEnergy, uStep;
 #define PI 3.14159265359
 #define TAU 6.28318530718
 vec2 toP(vec2 uv) { return (uv - 0.5) * vec2(uRes.x / uRes.y, 1.0); }
@@ -43,7 +43,9 @@ vec3 backSoft(vec2 p) { vec2 uv = toUv(p), d = vec2(0.0016 * uRes.y / uRes.x, 0.
         + textureLod(uPrev, uv + vec2(0.0, d.y), 0.0).rgb + textureLod(uPrev, uv - vec2(0.0, d.y), 0.0).rgb) / 6.0; }
 vec2 kaleido(vec2 p, float n) { float a = atan(p.y, p.x), r = length(p), s = TAU / n; a = mod(a, s); a = abs(a - 0.5 * s); return vec2(cos(a), sin(a)) * r; }
 float line(float d, float w) { float g = w / (abs(d) + w); return g * g; }
-vec3 fade(vec3 c, float k) { return max(c * k - 0.003, 0.0); }
+vec3 fade(vec3 c, float k) { return max(c * pow(k, uStep) - 0.003 * uStep, 0.0); }
+vec2 zoom(vec2 p, float z, float a) { return rot(a * uStep) * p / pow(z, uStep); }
+vec3 shift(vec3 c, float a) { return hueRot(c, a * uStep); }
 void done(vec3 c) { fragColor = vec4(min(c, vec3(8.0)), 1.0); }
 `;
 
@@ -52,8 +54,7 @@ void done(vec3 c) { fragColor = vec4(min(c, vec3(8.0)), 1.0); }
 void main() {
   vec2 p = toP(vUv);
   float r = length(p), a = atan(p.y, p.x);
-  float zoom = 1.03 + 0.04 * uBass + 0.03 * uBeat;
-  vec3 c = fade(hueRot(back(rot(0.006 + 0.018 * sin(uTime * 0.21 + uSeed)) * p / zoom), 0.012 + 0.03 * uTreb), 0.955);
+  vec3 c = fade(shift(back(zoom(p, 1.03 + 0.04 * uBass + 0.03 * uBeat, 0.006 + 0.018 * sin(uTime * 0.21 + uSeed))), 0.012 + 0.03 * uTreb), 0.955);
   float u = abs(fract(a / PI * 1.5) * 2.0 - 1.0);
   float s = spec(0.03 + u * 0.6);
   float R = 0.07 + 0.04 * uBass + 0.08 * s * s;
@@ -68,8 +69,8 @@ void main() {
   float r = length(p);
   float n = 6.0 + 2.0 * mod(floor(uBeats / 8.0 + uSeed), 4.0);
   vec2 k = kaleido(rot(uTime * 0.07 + uSeed) * p, n);
-  vec2 q = rot(0.03 * sin(uTime * 0.3) + 0.12 * r * (0.3 + uMid)) * k * (0.985 - 0.02 * uBass - 0.015 * uBeat);
-  vec3 c = fade(hueRot(backSoft(q), 0.025 + 0.05 * uBeat), 0.935);
+  vec2 q = zoom(k, 1.0 / (0.985 - 0.02 * uBass - 0.015 * uBeat), 0.03 * sin(uTime * 0.3) + 0.12 * r * (0.3 + uMid));
+  vec3 c = fade(shift(backSoft(q), 0.025 + 0.05 * uBeat), 0.935);
   vec2 w = k * 3.2;
   float f = fbm(w + 1.7 * vec2(fbm(w + uTime * 0.23 + uSeed), fbm(w - uTime * 0.19 + 3.1)));
   float ink = smoothstep(0.6, 0.86, f) * (0.08 + 0.45 * uBass + 0.3 * uBeat);
@@ -89,7 +90,7 @@ void main() {
     if (t < m) { m = t; mi = float(i); }
   }
   vec3 col = hsv(uHue + mi * 0.07, 0.85, 1.0) * exp(-m * 18.0) * (0.55 + 0.5 * uVol + 0.4 * uBeat);
-  vec3 b = fade(hueRot(backSoft(rot(-0.003) * p * 0.994), 0.01), 0.5);
+  vec3 b = fade(shift(backSoft(zoom(p, 1.0 / 0.994, -0.003)), 0.01), 0.5);
   done(b + col * uFade * 0.45);
 }` },
     { name: 'Mandala', src: `
@@ -98,7 +99,7 @@ void main() {
   float r = length(p), a = atan(p.y, p.x);
   float n = 5.0 + 2.0 * mod(floor(uBeats / 8.0 + uSeed * 3.0), 4.0);
   float dir = mod(floor(uBeats / 16.0 + uSeed), 2.0) * 2.0 - 1.0;
-  vec3 c = fade(hueRot(back(rot(0.008 * dir) * p / (1.012 + 0.035 * uBass + 0.02 * uBeat)), 0.018), 0.95);
+  vec3 c = fade(shift(back(zoom(p, 1.012 + 0.035 * uBass + 0.02 * uBeat, 0.008 * dir)), 0.018), 0.95);
   float pet = abs(cos(a * n * 0.5 + uTime * 0.15 * dir));
   float s = spec(0.02 + pet * 0.5);
   float R = 0.08 + 0.05 * uBass + 0.13 * s * pet;
@@ -119,21 +120,20 @@ void main() {
           + sin(length(w + vec2(sin(t * 0.6), cos(t * 0.5))) * 4.2 - t * 1.8);
   float bands = pow(0.5 + 0.5 * sin(v * 3.0 + uTime * 1.5 + uBass * 2.5), 4.0);
   vec3 col = pal(v * 0.16 + uHue + uTime * 0.03) * bands * (0.12 + 0.3 * uBass + 0.15 * uBeat);
-  vec2 q = p + 0.004 * vec2(sin(p.y * 9.0 + uTime), cos(p.x * 9.0 - uTime));
-  vec3 c = fade(hueRot(back(rot(0.003) * q * 0.995), 0.015), 0.88);
+  vec2 q = p + 0.004 * uStep * vec2(sin(p.y * 9.0 + uTime), cos(p.x * 9.0 - uTime));
+  vec3 c = fade(shift(back(zoom(q, 1.0 / 0.995, 0.003)), 0.015), 0.88);
   done(c + col * uFade);
 }` },
     { name: 'Hyperspace', src: `
 void main() {
   vec2 p = toP(vUv);
   float r = length(p), a = atan(p.y, p.x);
-  float zoom = 1.035 + 0.06 * uBass + 0.05 * uBeat;
-  vec3 c = fade(hueRot(back(rot(0.002 + 0.004 * sin(uTime * 0.2 + uSeed)) * p / zoom), 0.008), 0.93);
+  vec3 c = fade(shift(back(zoom(p, 1.03 + 0.05 * uBass + 0.12 * uBeat, 0.002 + 0.004 * sin(uTime * 0.2 + uSeed))), 0.008 + 0.05 * uBeat), 0.9);
   vec2 g = p * 60.0;
   float h = hash(floor(g) + mod(floor(uTime * 24.0), 997.0) * 7.13);
-  float star = step(0.993 - 0.003 * uTreb - 0.003 * uBeat, h) * smoothstep(0.45, 0.0, length(fract(g) - 0.5)) * smoothstep(0.5, 0.08, r);
-  vec3 col = hsv(uHue + a / TAU + r * 0.5, 0.5, 1.0) * star * 2.5;
-  col += hsv(uHue + 0.6, 0.8, 1.0) * line(r - 0.02 - 0.3 * (1.0 - uBeat), 0.004) * uBeat * 0.7;
+  float star = step(0.995 - 0.003 * uTreb - 0.02 * uBeat * uBeat, h) * smoothstep(0.45, 0.0, length(fract(g) - 0.5)) * smoothstep(0.5, 0.08, r);
+  vec3 col = hsv(uHue + a / TAU + r * 0.5, 0.5, 1.0) * star * (1.8 + 3.0 * uBeat * uBeat);
+  col += hsv(uHue + 0.6, 0.8, 1.0) * (line(r - 0.02 - 0.3 * (1.0 - uBeat), 0.006) * 1.2 + exp(-r * 9.0) * 0.25) * uBeat;
   done(c + col * uFade);
 }` },
     { name: 'Aurora', src: `
@@ -148,9 +148,9 @@ void main() {
             + 0.05 * wave(fract(x * 0.15 + 0.5 + fi * 0.13)) * (0.4 + uVol)
             + (fi - 2.0) * 0.065 * (1.0 + 0.5 * uBass);
     float d = p.y - y;
-    col += hsv(uHue + fi * 0.09 + x * 0.1, 0.75, 1.0) * (line(d, 0.0025 + 0.002 * uMid) + 0.03 / (1.0 + 500.0 * d * d)) * (0.45 + 0.8 * uVol);
+    col += hsv(uHue + fi * 0.09 + x * 0.1, 0.75, 1.0) * (line(d, 0.0025 + 0.002 * uMid + 0.003 * uBeat) + 0.03 / (1.0 + 500.0 * d * d)) * (0.35 + 0.6 * uVol + 0.9 * uBeat);
   }
-  vec3 c = fade(backSoft(p * 0.997 + vec2(0.0, -0.0015)), 0.9);
+  vec3 c = fade(backSoft(zoom(p, 1.0 / 0.997, 0.0) + vec2(0.0, -0.0015 * uStep)), 0.9);
   done(c + col * uFade);
 }` },
     { name: 'Liquid Mirror', src: `
@@ -159,7 +159,7 @@ void main() {
   float r = length(p);
   vec2 m = abs(p);
   float tw = 0.05 * sin(uTime * 0.17 + uSeed) + 0.2 * uBeat * sin(uSeed + uBeats);
-  vec3 c = fade(hueRot(back(rot(0.01 + tw * r) * p * (1.012 + 0.02 * uBass)), 0.012), 0.95);
+  vec3 c = fade(shift(back(zoom(p, 1.0 / (1.012 + 0.02 * uBass), 0.01 + tw * r)), 0.012), 0.95);
   float a = atan(m.y, m.x) / (PI * 0.5);
   float R = 0.18 + 0.1 * wave(a * 0.5 + 0.25) * (0.4 + uVol) + 0.04 * uBass;
   vec3 col = hsv(uHue + a * 0.3, 0.8, 1.0) * line(r - R, 0.0035);
@@ -172,7 +172,7 @@ float poly(vec2 p, float n) { float a = atan(p.y, p.x), s = TAU / n; return cos(
 void main() {
   vec2 p = toP(vUv);
   float r = length(p);
-  vec3 c = fade(hueRot(back(rot(0.004 + 0.008 * sin(uTime * 0.1 + uSeed)) * p / (1.028 + 0.04 * uBass)), 0.022), 0.94);
+  vec3 c = fade(shift(back(zoom(p, 1.028 + 0.04 * uBass, 0.004 + 0.008 * sin(uTime * 0.1 + uSeed))), 0.022), 0.94);
   vec3 col = vec3(0.0);
   for (int i = 0; i < 4; i++) {
     float fi = float(i);
@@ -204,7 +204,7 @@ void main() {
   vec3 tile = pal(id * 0.6 + uHue + z * 0.05) * (0.15 + 0.85 * s * s) * smoothstep(0.0, 0.1, edge);
   vec3 rim = hsv(uHue + 0.5 + id * 0.2, 0.7, 1.0) * line(edge, 0.02) * (0.4 + uTreb);
   vec3 col = (tile * (0.3 + 0.9 * uBass) + rim) * smoothstep(0.0, 0.25, r);
-  vec3 c = fade(back(p / 1.01), 0.55);
+  vec3 c = fade(back(zoom(p, 1.01, 0.0)), 0.55);
   done(c + col * uFade * 0.9);
 }` },
   ];
@@ -238,13 +238,14 @@ void main() {
 }`;
 
   const UNIFORMS = ['uPrev', 'uWave', 'uSpec', 'uRes', 'uTime', 'uBass', 'uMid', 'uTreb', 'uVol', 'uBeat', 'uBeats', 'uFade', 'uHue',
-    'uSeed', 'uEnergy', 'uTex', 'uTexRes', 'uFlash', 'uAber', 'uLod'];
+    'uSeed', 'uEnergy', 'uStep', 'uTex', 'uTexRes', 'uFlash', 'uAber', 'uLod'];
 
   // ---------------------------------------------------------------- what it hears (or dreams)
   const A = {
     wave: new Uint8Array(512).fill(128), spec: new Uint8Array(64),
     live: false, gotAt: 0, raw: { bass: 0, mid: 0, treb: 0, vol: 0 }, pyBeats: null, pending: false,
     bass: 0, mid: 0, treb: 0, vol: 0, energy: 0.3, beat: 0, beats: 0, quiet: 0, dreamBeat: -1, dreaming: true,
+    bassSlow: 0, pulse: 0, step: 1, device: '', problem: '', lastBeatAt: 0,
     hue: Math.random(), hueTo: 0,
   };
   A.hueTo = A.hue;
@@ -282,6 +283,7 @@ void main() {
   }
   function take(f) {
     A.live = !!f.live;
+    A.device = f.device || ''; A.problem = f.problem || '';
     A.raw = { bass: +f.bass || 0, mid: +f.mid || 0, treb: +f.treb || 0, vol: +f.vol || 0 };
     if (A.live) {
       A.gotAt = performance.now();
@@ -294,7 +296,7 @@ void main() {
   // a steady 118 bpm when there's nothing to hear (or the music is playing on another device)
   function dream(t, playing) {
     const len = 60 / 118, n = Math.floor(t / len), ph = t / len - n;
-    const lvl = playing ? 1 : 0.4;
+    const lvl = playing ? 1 : 0.35;
     const kick = Math.exp(-ph * 6) * (n % 4 === 3 ? 0.75 : 1);
     const out = {
       bass: (0.15 + 0.65 * kick) * lvl,
@@ -319,10 +321,11 @@ void main() {
   function tick(dt) {
     clock += dt;
     const playing = !!(state && state.now && state.now.playing);
+    const paused = !!(state && state.connected && state.now && !state.now.playing);   // only calm down when we know
     if (hearing()) A.quiet = A.raw.vol < 0.03 && A.raw.bass < 0.08 ? A.quiet + dt : 0;
     A.dreaming = !hearing() || (playing && A.quiet > 4);
     let target, beat = false;
-    if (A.dreaming) { target = dream(clock, playing); beat = target.beat; }
+    if (A.dreaming) { target = dream(clock, !paused); beat = target.beat; }
     else { target = A.raw; beat = A.pending; }
     A.pending = false;
     const ease = (v, to, up, down) => v + (to - v) * (1 - Math.exp(-dt * (to > v ? up : down)));
@@ -332,13 +335,17 @@ void main() {
     A.vol = ease(A.vol, target.vol, 20, 5);
     A.energy = ease(A.energy, A.vol, 0.6, 0.3);
     A.beat = beat ? 1 : A.beat * Math.exp(-dt * 5);
+    A.bassSlow = ease(A.bassSlow, A.bass, 2.2, 2.2);
+    A.pulse = Math.max(A.beat, Math.min(1, Math.max(0, (A.bass - A.bassSlow) * 2.8)));   // every real bass hit, beat or not
+    A.step = Math.max(0.25, Math.min(3, dt * 60));
+    if (beat) A.lastBeatAt = clock;
     if (beat) { A.beats++; sceneBeats++; if (A.beats % 8 === 0) A.hueTo += 0.12 + Math.random() * 0.2; }
     A.hueTo += dt * 0.012;
     A.hue += (A.hueTo - A.hue) * (1 - Math.exp(-dt * 1.5));
     fadeIn = Math.min(1, fadeIn + dt / 1.6);
     flash *= Math.exp(-dt * 7);
     const age = clock - sceneAt;
-    if (auto && mode === 'gl' && ((beat && sceneBeats >= sceneLen && age > 12) || age > 50)) next();
+    if (auto && mode === 'gl' && ((beat && sceneBeats >= sceneLen && age > 12) || age > 40)) next();
   }
 
   // ---------------------------------------------------------------- the graphics card
@@ -478,7 +485,8 @@ void main() {
     gl.uniform2f(u.uRes, fw, fh);
     gl.uniform1f(u.uTime, clock);
     gl.uniform1f(u.uBass, A.bass); gl.uniform1f(u.uMid, A.mid); gl.uniform1f(u.uTreb, A.treb); gl.uniform1f(u.uVol, A.vol);
-    gl.uniform1f(u.uBeat, A.beat); gl.uniform1f(u.uBeats, A.beats % 4096); gl.uniform1f(u.uEnergy, A.energy);
+    gl.uniform1f(u.uBeat, A.pulse); gl.uniform1f(u.uBeats, A.beats % 4096); gl.uniform1f(u.uEnergy, A.energy);
+    gl.uniform1f(u.uStep, A.step);
     gl.uniform1f(u.uFade, fadeIn); gl.uniform1f(u.uHue, A.hue % 1); gl.uniform1f(u.uSeed, seed);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -490,7 +498,7 @@ void main() {
     gl.useProgram(post.prog);
     const v = post.u;
     gl.uniform2f(v.uTexRes, fw, fh); gl.uniform2f(v.uRes, canvas.width, canvas.height);
-    gl.uniform1f(v.uTime, clock); gl.uniform1f(v.uBeat, A.beat); gl.uniform1f(v.uBass, A.bass);
+    gl.uniform1f(v.uTime, clock); gl.uniform1f(v.uBeat, A.pulse); gl.uniform1f(v.uBass, A.bass);
     gl.uniform1f(v.uFlash, flash); gl.uniform1f(v.uAber, 0.004);
     const lod = f => Math.max(0, Math.log2(f * fh));
     gl.uniform3f(v.uLod, lod(0.008), lod(0.025), lod(0.06));
@@ -576,8 +584,10 @@ void main() {
   function note() {
     const how = mode === '2d' ? "Simple mode: this PC's graphics can't run the full show"
       : mode !== 'gl' ? "This PC's graphics can't draw the visualizer"
-      : A.dreaming ? (A.live ? 'Dreaming along: no sound from this PC right now' : "Dreaming along: couldn't listen to the speakers")
-      : 'Listening to your speakers';
+      : !A.dreaming ? `Listening to ${A.device || 'your speakers'}`
+      : A.live ? `Dreaming along: no sound from ${A.device || 'this PC'} right now`
+      : A.problem ? `Dreaming along: couldn't listen to the speakers (${A.problem})`
+      : 'Dreaming along: starting to listen…';
     root.querySelector('.vis-note').textContent = mode === 'gl' ? `${how}  ·  ← → scenes  ·  F full screen  ·  Esc close` : `${how}  ·  Esc close`;
   }
   function showUI() {
@@ -715,12 +725,15 @@ void main() {
     pick: i => { if (isOpen && mode === 'gl' && ready(progs[i])) go(i); },
     quality: q => { quality = Math.max(0.2, Math.min(2, +q || quality)); sizeKey = ''; },
     // for testing: draw n frames right now at a fixed step, from a blank picture if asked
-    step: (n, dt = 1 / 60, fresh = false) => {
+    step: (n, dt = 1 / 60, fresh = false, feed = null) => {
       if (mode !== 'gl') return;
       cancelAnimationFrame(raf);
       if (fresh) { drop(fbo[0]); drop(fbo[1]); fbo = [null, null]; sizeKey = ''; fw = fh = 0; }
-      A.gotAt = 0;
-      for (let i = 0; i < n; i++) { tick(dt); drawGL(dt); }
+      for (let i = 0; i < n; i++) {
+        const f = feed && feed(i);
+        if (f) { take(f); A.gotAt = performance.now(); } else A.gotAt = 0;
+        tick(dt); drawGL(dt);
+      }
       gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
     },
     info: () => ({ mode, scene: scene >= 0 ? SCENES[scene].name : '', ready: progs.filter(p => p.ok).length,

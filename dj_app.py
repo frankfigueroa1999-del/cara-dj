@@ -863,6 +863,15 @@ def self_test(path):
         bundled = [n for n in os.listdir(os.path.join(HERE, "my_stingers")) if n.lower().endswith(".mp3")]
         if len(bundled) < 6:
             raise RuntimeError(f"only {len(bundled)} stingers inside the app")
+        # the visualizer's listener loads soundcard in its own thread, which sets Windows audio up by itself
+        # (a runner may have no speakers; what must never happen is that setup failing, "Error 0x100000001")
+        listener = pc_audio.LISTENER
+        listener.running, listener._used = True, 0
+        probe = threading.Thread(target=listener._run, daemon=True)
+        probe.start()
+        probe.join(30)
+        if "0x100000001" in (listener.error or ""):
+            raise RuntimeError(f"the visualizer couldn't set up Windows audio: {listener.error}")
         import soundcard  # noqa: F401  (the visualizer listens to the speakers)
         if sys.platform == "win32":
             import clr  # noqa: F401  (pythonnet: the window's bridge to Windows)
