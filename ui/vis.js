@@ -3,6 +3,8 @@
 // and, when it can't hear anything, dreams along to a steady beat. Ten scenes in the spirit of MilkDrop and
 // the old console visualizers: every frame is the last one warped, recoloured and faded, with fresh shapes
 // drawn on top from the music. Scenes change on the beat.
+// It also plays MilkDrop presets (the classic Winamp visualizer) through Butterchurn, an open-source WebGL MilkDrop:
+// 481 come built in, and any .milk files you drop in the presets folder are converted and join the rotation.
 'use strict';
 
 const Vis = (() => {
@@ -257,6 +259,10 @@ void main() {
   let quality = 0.72, sizeKey = '', fw = 0, fh = 0;
   const perf = { t: 0, n: 0 };
   let state = null, songUri = null, fsOn = false;
+  let source = 'mix';                                  // which scenes rotate: mix, milk (MilkDrop) or mine (the ten above)
+  const M = { viz: null, starting: null, broken: '', canvas: null, pack: {}, names: [], user: [], active: false, name: '',
+    bad: new Set(), watch: null, cut: false, w: 0, h: 0, t1k: new Uint8Array(1024).fill(128), live1k: new Uint8Array(1024).fill(128), ph: [0, 0, 0],
+    checkAt: 0, loading: false, converter: null };
   let uiTimer = 0, songTimer = 0, nameTimer = 0, pollTimer = 0, polling = false, noteTimer = 0;
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -287,7 +293,7 @@ void main() {
     A.raw = { bass: +f.bass || 0, mid: +f.mid || 0, treb: +f.treb || 0, vol: +f.vol || 0 };
     if (A.live) {
       A.gotAt = performance.now();
-      if (!A.dreaming) { if (f.wave) unpack(f.wave, A.wave); if (f.spec) unpack(f.spec, A.spec); }
+      if (!A.dreaming) { if (f.wave) unpack(f.wave, A.wave); if (f.spec) unpack(f.spec, A.spec); if (f.wave1k) unpack(f.wave1k, M.live1k); }
     }
     if (A.pyBeats != null && f.beats > A.pyBeats) A.pending = true;
     A.pyBeats = f.beats;
@@ -345,7 +351,7 @@ void main() {
     fadeIn = Math.min(1, fadeIn + dt / 1.6);
     flash *= Math.exp(-dt * 7);
     const age = clock - sceneAt;
-    if (auto && mode === 'gl' && ((beat && sceneBeats >= sceneLen && age > 12) || age > 40)) next();
+    if (auto && mode === 'gl' && !M.loading && ((beat && sceneBeats >= sceneLen && age > 12) || age > 40)) next();
   }
 
   // ---------------------------------------------------------------- the graphics card
@@ -542,31 +548,250 @@ void main() {
     raf = requestAnimationFrame(frame);
     const raw = (now - lastNow) / 1000;
     lastNow = now;
-    tick(Math.min(0.1, Math.max(0, raw)));
-    if (mode === 'gl') drawGL(raw);
+    const dt = Math.min(0.1, Math.max(0, raw));
+    tick(dt);
+    if (mode === 'gl') { if (M.active && M.viz) drawMilk(dt, raw); else drawGL(raw); }
     else if (mode === '2d') draw2D();
   }
 
+  // ---------------------------------------------------------------- MilkDrop (Butterchurn)
+  const call = (name, ...args) => { const api = bridge(); return api && api[name] ? Promise.resolve(api[name](...args)) : Promise.resolve(null); };
+  function milkStart() {
+    if (M.starting) return M.starting;
+    M.starting = (async () => {
+      const lib = (await import('./vendor/butterchurn.min.js')).default;
+      const [pack, images] = await Promise.all([
+        fetch('presets/pack.json').then(r => r.json()),
+        fetch('presets/images.json').then(r => r.json()).catch(() => null)]);
+      M.pack = pack; M.names = Object.keys(pack);
+      milkSize(true);
+      M.viz = lib.createVisualizer(null, M.canvas, { width: M.w, height: M.h, pixelRatio: 1, textureRatio: 1 });
+      if (images) M.viz.loadExtraImages(images);
+      const g = M.viz.gl, compile = g && g.compileShader.bind(g);          // notice a preset's shader failing to compile
+      if (compile) g.compileShader = sh => { compile(sh); if (M.watch && !M.watch.failed && !g.getShaderParameter(sh, g.COMPILE_STATUS)) M.watch.failed = (g.getShaderInfoLog(sh) || 'compile error').split('\n')[0].slice(0, 160); };
+      milkUser();
+      return true;
+    })().catch(e => { M.broken = String(e && e.message || e); console.error('[visualizer] MilkDrop could not start:', e); return false; });
+    return M.starting;
+  }
+  async function milkUser() {
+    const r = await call('milk_list').catch(() => null);
+    M.user = (r && Array.isArray(r.items)) ? r.items.filter(x => !x.failed) : [];
+  }
+  function milkSize(force) {
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.25);
+    let w = Math.max(2, Math.round(root.clientWidth * dpr)), h = Math.max(2, Math.round(root.clientHeight * dpr));
+    const big = w * h / (quality < 0.6 ? 0.8e6 : 1.6e6);
+    if (big > 1) { w = Math.round(w / Math.sqrt(big)); h = Math.round(h / Math.sqrt(big)); }
+    if (!force && w === M.w && h === M.h) return;
+    M.w = w; M.h = h; M.canvas.width = w; M.canvas.height = h;
+    if (M.viz) M.viz.setRendererSize(w, h);
+  }
+  // turns a .milk file into what Butterchurn plays: the equations stay as they are, the shaders go HLSL to GLSL
+  async function milkConvert(text) {
+    const script = src => new Promise((ok, fail) => {
+      const sc = document.createElement('script');
+      sc.src = src; sc.onload = ok; sc.onerror = () => fail(new Error(`couldn't load ${src}`));
+      document.head.appendChild(sc);
+    });
+    if (!M.converter) {
+      M.converter = Promise.all([script('vendor/milk-utils.min.js'), script('vendor/hlslparser.js')])
+        .then(() => window.HLSLParserModule())
+        .then(mod => ({ utils: window.MilkUtils, parse: mod.cwrap('parseHLSL', 'string', ['string', 'string', 'string']) }));
+    }
+    const { utils, parse } = await M.converter;
+    const parts = utils.splitPreset(text);
+    const shader = (src, kind) => {
+      if (!src || !src.trim()) return '';
+      const name = 'main_shader_sentinel';
+      const out = parse(utils.prepareShader(src).replace('float4 shader_body (', `float4 ${name} (`), name, 'fs');
+      if (/^(parsing|code generation) failed/.test(out)) throw new Error(`its shader didn't convert (${out})`);
+      return fitShader(utils.processUnOptimizedShader(out), kind);
+    };
+    return {
+      version: parts.presetVersion, baseVals: parts.baseVals, warp: shader(parts.warp, 'warp'), comp: shader(parts.comp, 'comp'),
+      init_eqs_eel: parts.presetInit || '', frame_eqs_eel: parts.perFrame || '', pixel_eqs_eel: parts.perVertex || '',
+      shapes: parts.shapes.map(x => ({ baseVals: x.baseVals, init_eqs_eel: x.init_eqs_str || '', frame_eqs_eel: x.frame_eqs_str || '' })),
+      waves: parts.waves.map(x => ({ baseVals: x.baseVals, init_eqs_eel: x.init_eqs_str || '', frame_eqs_eel: x.frame_eqs_str || '',
+        point_eqs_eel: x.point_eqs_str || '' })),
+    };
+  }
+  // Butterchurn writes MilkDrop's per-pixel inputs (rad, ang, ...) inside its own main() and declares the standard
+  // textures itself; the converted helper code lives outside main(). This makes the two fit together.
+  const BUILT_IN_SAMPLERS = new Set(['sampler_main', 'sampler_fw_main', 'sampler_fc_main', 'sampler_pw_main', 'sampler_pc_main',
+    'sampler_blur1', 'sampler_blur2', 'sampler_blur3', 'sampler_noise_lq', 'sampler_noise_lq_lite', 'sampler_noise_mq',
+    'sampler_noise_hq', 'sampler_pw_noise_lq', 'sampler_noisevol_lq', 'sampler_noisevol_hq']);
+  const TYPES = 'float|int|uint|bool|vec[234]|ivec[234]|uvec[234]|bvec[234]|mat[234]';
+  function fitShader(text, kind) {
+    const at = text.indexOf('shader_body');
+    if (at < 0) return text;
+    let head = text.slice(0, at);
+    const rest = text.slice(at), body = rest.slice(rest.indexOf('{') + 1, rest.lastIndexOf('}'));
+    const first = [], inits = [];
+    // the standard textures are declared already; any other texture has to be a uniform
+    head = head.replace(/^[ \t]*(?:uniform\s+)?(sampler2D|sampler3D)\s+(\w+)\s*;[ \t]*$/gm,
+      (m, type, n) => (BUILT_IN_SAMPLERS.has(n) ? '' : `uniform ${type} ${n};`));
+    // globals set from anything but constants: declare them out here, set them at the top of the body
+    let depth = 0;
+    head = head.split('\n').map(line => {
+      const was = depth;
+      depth += (line.match(/{/g) || []).length - (line.match(/}/g) || []).length;
+      if (was !== 0) return line;
+      const m = line.match(new RegExp(`^\\s*(?:static\\s+)?((?:(?:lowp|mediump|highp)\\s+)?(?:${TYPES}))\\s+(\\w+)\\s*=\\s*(.+);\\s*$`));
+      if (!m || /^\s*const\b/.test(line)) return line;
+      inits.push(`${m[2]} = ${m[3]};`);
+      return `${m[1]} ${m[2]};`;
+    }).join('\n');
+    // rad, ang, hue_shader and uv_orig: helper code gets copies the body fills in first
+    const types = { rad: 'float', ang: 'float', hue_shader: 'vec3', uv_orig: 'vec2' };
+    const used = (kind === 'comp' ? ['rad', 'ang', 'hue_shader', 'uv_orig'] : ['rad', 'ang']).filter(n => new RegExp(`\\b${n}\\b`).test(head));
+    for (const n of used) {
+      head = head.replace(new RegExp(`\\b${n}\\b`, 'g'), `md_${n}`);
+      first.push(`md_${n} = ${n};`);
+    }
+    if (used.length) head = used.map(n => `${types[n]} md_${n};`).join('\n') + '\n' + head;
+    // MilkDrop lets shaders write to q1-q32; here they're uniforms (q1 is a macro for _qa.x): use writable copies
+    let main = body;
+    const letters = 'abcdefgh', vecs = new Set();
+    for (let n = 1; n <= 32; n++) if (new RegExp(`\\bq${n}\\b`).test(head + body)) vecs.add(letters[(n - 1) >> 2]);
+    for (const c of letters) if (new RegExp(`\\b_q${c}\\b`).test(head + body)) vecs.add(c);
+    let defs = '';
+    for (const c of vecs) {
+      defs += `vec4 md_q${c};\n`;
+      for (let k = 0; k < 4; k++) { const n = letters.indexOf(c) * 4 + k + 1; defs += `#undef q${n}\n#define q${n} md_q${c}.${'xyzw'[k]}\n`; }
+      const re = new RegExp(`\\b_q${c}\\b`, 'g');
+      head = head.replace(re, `md_q${c}`); main = main.replace(re, `md_q${c}`);
+      first.push(`md_q${c} = _q${c};`);
+    }
+    head = defs + head;
+    return `${head}shader_body {\n${first.concat(inits).join('\n')}\n${main}\n}`;
+  }
+  async function milkPreset(item) {
+    if (!item.user) return M.pack[item.name];
+    const got = await call('milk_get', item.path);
+    if (!got || got.error) throw new Error((got && got.error) || 'the preset file went missing');
+    if (got.preset) return got.preset;
+    const preset = await milkConvert(got.text);
+    call('milk_save', item.path, got.mtime, preset, '');
+    return preset;
+  }
+  const pretty = name => name.replace(/\.(milk|json)$/i, '').replace(/^[_$\s]+/, '').replace(/\s+/g, ' ').trim();
+  async function goMilk(item, back = false) {
+    M.loading = true;
+    try {
+      if (!(await milkStart())) throw new Error(M.broken || 'MilkDrop is unavailable');
+      const preset = await milkPreset(item);
+      if (!preset) throw new Error('empty preset');
+      const blend = M.active && !M.cut ? 2.7 : 0;
+      M.cut = false;
+      M.watch = item.user ? { failed: '' } : null;
+      await M.viz.loadPreset(preset, blend);
+      const failed = M.watch && M.watch.failed;
+      M.watch = null;
+      if (failed) throw new Error(`its shader has an error (${failed})`);
+      M.active = true; M.name = item.name;
+      root.classList.add('milk');
+      M.checkAt = item.user ? performance.now() + 300 : 0;
+      if (!back) { seen.push(item); if (seen.length > 40) seen.shift(); }
+      sceneAt = clock; sceneBeats = 0; sceneLen = 24 + 8 * Math.floor(Math.random() * 4);
+      if (!blend) flash = 0.3;
+      say(pretty(item.name));
+    } catch (e) {
+      console.warn('[visualizer] skipped a MilkDrop preset:', item.name, e);
+      M.bad.add(item.key);
+      if (item.user) call('milk_save', item.path, item.mtime || 0, null, String(e && e.message || e));
+      M.loading = false; M.cut = true;
+      if (!M.active && scene < 0) return;
+      return next();
+    }
+    M.loading = false;
+  }
+  function milkWave(dt) {
+    if (!A.dreaming) return M.live1k;
+    const t = M.t1k, f = [55, 440, 3520], amp = [0.6 * A.bass, 0.25 * A.mid, 0.12 * A.treb];
+    for (let k = 0; k < 3; k++) M.ph[k] = (M.ph[k] + dt * f[k] * 6.2832) % 6.2832;
+    for (let i = 0; i < 1024; i++) {
+      const tt = i / 48000;
+      let v = 0;
+      for (let k = 0; k < 3; k++) v += Math.sin(6.2832 * f[k] * tt + M.ph[k]) * amp[k];
+      t[i] = Math.max(0, Math.min(255, 128 + 120 * v));
+    }
+    return t;
+  }
+  function drawMilk(dt, raw) {
+    milkSize(false);
+    const wave = milkWave(dt);
+    try {
+      M.viz.render({ audioLevels: { timeByteArray: wave, timeByteArrayL: wave, timeByteArrayR: wave }, elapsedTime: dt || 1 / 60 });
+    } catch (e) { console.warn('[visualizer] MilkDrop stumbled:', e); M.bad.add('milk:' + M.name); next(); return; }
+    if (M.checkAt && performance.now() > M.checkAt) {          // one of yours didn't compile? skip it
+      M.checkAt = 0;
+      const err = M.viz.gl && M.viz.gl.getError();
+      if (err) {
+        const item = seen[seen.length - 1];
+        console.warn('[visualizer] a converted preset has a graphics error, skipping:', M.name, err);
+        if (item && item.user) { M.bad.add(item.key); call('milk_save', item.path, item.mtime || 0, null, 'graphics error ' + err); }
+        next();
+      }
+    }
+    if (raw < 0.25) {
+      perf.t += raw; perf.n++;
+      if (perf.t > 2.5) {
+        const avg = perf.t / perf.n;
+        perf.t = perf.n = 0;
+        if (avg > 1 / 38 && quality > 0.36) { quality = Math.max(0.35, quality * 0.8); sizeKey = ''; milkSize(true); }
+      }
+    }
+  }
+  function milkPick() {
+    const recent = new Set(seen.slice(-12).filter(x => x && x.key).map(x => x.key));
+    const mine = M.user.filter(x => !M.bad.has('user:' + x.path) && !recent.has('user:' + x.path));
+    if (mine.length && Math.random() < 0.5) {                 // your own presets come up half the time
+      const x = mine[Math.floor(Math.random() * mine.length)];
+      return { key: 'user:' + x.path, name: x.name, path: x.path, mtime: x.mtime, user: true };
+    }
+    const names = M.names.filter(n => !M.bad.has('milk:' + n) && !recent.has('milk:' + n));
+    if (!names.length) return null;
+    const n = names[Math.floor(Math.random() * names.length)];
+    return { key: 'milk:' + n, name: n };
+  }
+  function setSource(s) {
+    source = s;
+    const b = root.querySelector('[data-v=source]');
+    b.textContent = { mix: 'Mix', milk: 'MilkDrop', mine: 'Cara' }[s];
+    say({ mix: 'Mixing MilkDrop and Cara scenes', milk: 'MilkDrop presets only', mine: "Cara's scenes only" }[s]);
+    if ((s === 'milk' && !M.active) || (s === 'mine' && M.active)) next();
+  }
+
   // ---------------------------------------------------------------- scenes
-  function go(i) {
+  function go(i, back = false) {
+    if (M.active) { M.active = false; root.classList.remove('milk'); }
     scene = i;
-    seen.push(i); if (seen.length > 40) seen.shift();
+    if (!back) { seen.push(i); if (seen.length > 40) seen.shift(); }
     sceneAt = clock; sceneBeats = 0; sceneLen = 24 + 8 * Math.floor(Math.random() * 4);
     seed = Math.random() * 6.283; fadeIn = 0; flash = 0.3;
     say(SCENES[i].name);
   }
   function next() {
+    if (M.loading) return;
+    const milkOk = M.viz && !M.broken && M.names.length;
+    const wantMilk = source === 'milk' ? 1 : source === 'mine' ? 0 : 0.6;
+    if (mode === 'gl' && Math.random() < wantMilk) {
+      if (milkOk) { const item = milkPick(); if (item) return goMilk(item); }
+      else if (!M.broken && source === 'milk') { milkStart().then(ok => ok && next()); return; }
+    }
     const ok = progs.map((p, i) => (p.ok ? i : -1)).filter(i => i >= 0);
     if (!ok.length) return;
-    const recent = seen.slice(-Math.min(5, ok.length - 1));
+    const recent = seen.filter(x => typeof x === 'number').slice(-Math.min(5, ok.length - 1));
     const pool = ok.filter(i => !recent.includes(i));
     go((pool.length ? pool : ok)[Math.floor(Math.random() * (pool.length || ok.length))]);
   }
   function prev() {
+    if (M.loading) return;
     if (seen.length < 2) return next();
     seen.pop();
-    const i = seen.pop();
-    go(i);
+    const x = seen[seen.length - 1];
+    if (typeof x === 'number') go(x, true); else goMilk(x, true);
   }
   function setAuto(on) {
     auto = on;
@@ -588,7 +813,8 @@ void main() {
       : A.live ? `Dreaming along: no sound from ${A.device || 'this PC'} right now`
       : A.problem ? `Dreaming along: couldn't listen to the speakers (${A.problem})`
       : 'Dreaming along: starting to listen…';
-    root.querySelector('.vis-note').textContent = mode === 'gl' ? `${how}  ·  ← → scenes  ·  F full screen  ·  Esc close` : `${how}  ·  Esc close`;
+    const milk = M.names.length ? `  ·  ${M.names.length} MilkDrop presets${M.user.length ? ` + ${M.user.length} of yours` : ''}` : '';
+    root.querySelector('.vis-note').textContent = mode === 'gl' ? `${how}${milk}  ·  ← → scenes  ·  F full screen  ·  Esc close` : `${how}  ·  Esc close`;
   }
   function showUI() {
     root.classList.add('ui');
@@ -631,13 +857,15 @@ void main() {
     const ic = name => (typeof icon === 'function' ? icon(name, 20) : '');
     root = document.createElement('div');
     root.id = 'vis';
-    root.innerHTML = `<canvas></canvas>
+    root.innerHTML = `<canvas></canvas><canvas class="milk"></canvas>
       <div class="vis-scene"></div>
       <div class="vis-song"><div class="art"></div><div class="ell"><b class="ell"></b><small class="ell"></small></div></div>
       <div class="vis-cara"></div>
       <div class="vis-ui">
         <div class="vis-note"></div>
         <div class="vis-top">
+          <button class="chip" data-v="source" title="Which scenes play: MilkDrop presets, Cara's own, or a mix (M)">Mix</button>
+          <button class="round" data-v="folder" title="Your MilkDrop presets folder: drop .milk files in it">${ic('folder')}</button>
           <button class="chip on" data-v="auto" title="Change scenes with the music (A)">Auto</button>
           <button class="round" data-v="prev" title="Previous scene (←)">${ic('back')}</button>
           <button class="round" data-v="next" title="Next scene (→)">${ic('forward')}</button>
@@ -648,7 +876,8 @@ void main() {
     document.body.appendChild(root);
     root.addEventListener('mousemove', showUI);
     root.addEventListener('mousedown', showUI);
-    root.querySelector('canvas').addEventListener('dblclick', fullscreen);
+    M.canvas = root.querySelector('canvas.milk');
+    root.querySelectorAll('canvas').forEach(c => c.addEventListener('dblclick', fullscreen));
     root.addEventListener('click', e => {
       const b = e.target.closest('[data-v]');
       if (!b) return;
@@ -659,6 +888,8 @@ void main() {
       else if (v === 'prev') prev();
       else if (v === 'full') fullscreen();
       else if (v === 'auto') setAuto(!auto);
+      else if (v === 'source') setSource({ mix: 'milk', milk: 'mine', mine: 'mix' }[source]);
+      else if (v === 'folder') call('open_presets').then(() => milkUser());
     });
     document.addEventListener('keydown', e => {
       if (!isOpen || e.ctrlKey || e.altKey || e.metaKey) return;
@@ -668,6 +899,7 @@ void main() {
       else if (k === 'arrowleft' || k === 'p') { prev(); showUI(); }
       else if (k === 'f') { e.preventDefault(); fullscreen(); }
       else if (k === 'a') { setAuto(!auto); showUI(); }
+      else if (k === 'm' && mode === 'gl') { setSource({ mix: 'milk', milk: 'mine', mine: 'mix' }[source]); showUI(); }
     });
     init();
   }
@@ -687,6 +919,7 @@ void main() {
         if (ready(progs[i])) { go(i); break; }
       }
     }
+    if (mode === 'gl') { milkStart(); if (M.viz) milkUser(); }
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(frame);
     poll();
@@ -710,7 +943,11 @@ void main() {
     state = s || state;
     if (!isOpen || !state) return;
     const t = state.now && state.now.track, uri = t ? t.uri : '';
-    if (uri !== songUri) { songUri = uri; if (t) song(t); }
+    if (uri !== songUri) {
+      songUri = uri;
+      if (t && M.active && M.viz) { try { M.viz.launchSongTitleAnim(`${t.artistLine || t.artist} - ${t.title}`); } catch (e) { song(t); } }
+      else if (t) song(t);
+    }
     caption(state.dj);
   }
 
@@ -736,7 +973,28 @@ void main() {
       }
       gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
     },
-    info: () => ({ mode, scene: scene >= 0 ? SCENES[scene].name : '', ready: progs.filter(p => p.ok).length,
+    milk: async (name, user = false) => {
+      if (!isOpen || mode !== 'gl') return false;
+      if (!(await milkStart())) return false;
+      const item = user ? M.user.find(x => x.name === name || x.path === name) : null;
+      if (user && !item) return false;
+      await goMilk(user ? { key: 'user:' + item.path, name: item.name, path: item.path, mtime: item.mtime, user: true }
+        : { key: 'milk:' + name, name: name || M.names[Math.floor(Math.random() * M.names.length)] });
+      return M.active;
+    },
+    milkNames: () => M.names.slice(),
+    milkStep: (n, dt = 1 / 60, feed = null) => {
+      if (!M.active || !M.viz) return false;
+      cancelAnimationFrame(raf);
+      for (let i = 0; i < n; i++) {
+        const f = feed && feed(i);
+        if (f) { take(f); A.gotAt = performance.now(); } else A.gotAt = 0;
+        tick(dt); drawMilk(dt, dt);
+      }
+      return true;
+    },
+    info: () => ({ mode, scene: M.active ? 'MilkDrop: ' + M.name : scene >= 0 ? SCENES[scene].name : '', ready: progs.filter(p => p.ok).length,
+      milk: { ready: !!M.viz, broken: M.broken, presets: M.names.length, yours: M.user.length, bad: [...M.bad], active: M.active, source },
       failed: progs.filter(p => p.bad).map(p => p.name), quality, size: [fw, fh], canvas: canvas ? [canvas.width, canvas.height] : null,
       dreaming: A.dreaming, live: A.live, half, beats: A.beats }),
   };

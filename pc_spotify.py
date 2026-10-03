@@ -17,6 +17,7 @@ SCOPES = " ".join([
     "user-read-recently-played", "user-top-read", "user-library-read", "user-library-modify",
     "playlist-read-private", "playlist-read-collaborative", "playlist-modify-private", "playlist-modify-public",
     "user-follow-read", "user-follow-modify",
+    "streaming", "user-read-email", "user-read-private",     # the built-in player (Spotify's Web Playback SDK)
 ])
 
 sp = None

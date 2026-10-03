@@ -520,6 +520,9 @@ input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px;
 #vis.open { opacity: 1; pointer-events: auto; }
 #vis.ui { cursor: default; }
 #vis canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+#vis canvas.milk { display: none; }
+#vis.milk canvas.milk { display: block; }
+#vis.milk canvas:not(.milk) { visibility: hidden; }
 #vis .vis-ui { position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .5s; }
 #vis.ui .vis-ui { opacity: 1; }
 #vis .vis-ui > * { pointer-events: auto; }

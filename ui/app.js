@@ -235,7 +235,10 @@ function banners() {
   if (!s.keys) return `<div class="banner glass">${'<div class="ic">' + icon('radio') + '</div>'}<div class="txt"><b>Connect Spotify</b><span>Add your Spotify app's Client ID and Secret in Settings. Your music plays through the Spotify app; Cara talks over it from here.</span></div><button class="pill primary small" data-act="settings">Open Settings</button></div>`;
   if (s.connecting) return `<div class="banner glass"><div class="ic"><div class="spinner" style="width:20px;height:20px"></div></div><div class="txt"><b>Connecting to Spotify…</b><span>The first time, a browser tab opens: click Agree, then come back here.</span></div></div>`;
   if (!s.connected) return `<div class="banner glass warn"><div class="ic">${icon('warning')}</div><div class="txt"><b>Spotify isn't connected</b><span>${esc(s.problem || 'Press Connect to log in.')}</span></div><button class="pill primary small" data-act="connect">Connect</button><button class="pill secondary small" data-act="settings">Settings</button></div>`;
-  if (s.hint === 'no-device') return `<div class="banner glass warn"><div class="ic">${icon('speaker')}</div><div class="txt"><b>Spotify isn't open</b><span>Open the Spotify app on this PC and play any song once. Then everything here works.</span></div><button class="pill primary small" data-act="open-spotify">Open Spotify</button></div>`;
+  const pl = s.player || {}, nothing = !(s.now && s.now.track);
+  if (pl.mode === 'app' && nothing && pl.status === 'starting') return `<div class="banner glass"><div class="ic"><div class="spinner" style="width:20px;height:20px"></div></div><div class="txt"><b>Starting the built-in player…</b><span>${esc(pl.problem || 'Your music plays right here in the app, no Spotify app needed.')}</span></div></div>`;
+  if (pl.mode === 'app' && nothing && (pl.status === 'premium' || pl.status === 'error')) return `<div class="banner glass warn"><div class="ic">${icon('warning')}</div><div class="txt"><b>The built-in player couldn't start</b><span>${esc(pl.problem)}</span></div><button class="pill secondary small" data-act="player-mode" data-mode="spotify">Use the Spotify app</button>${pl.status === 'error' ? '<button class="pill primary small" data-act="player-retry">Try again</button>' : ''}</div>`;
+  if (s.hint === 'no-device' && !(pl.mode === 'app' && pl.ready)) return `<div class="banner glass warn"><div class="ic">${icon('speaker')}</div><div class="txt"><b>Spotify isn't open</b><span>Open the Spotify app on this PC and play any song once. Then everything here works.</span></div><button class="pill primary small" data-act="open-spotify">Open Spotify</button></div>`;
   return '';
 }
 
@@ -801,7 +804,12 @@ async function devicesMenu(x, y) {
   const devs = Array.isArray(list) ? list : [];
   const items = [{ head: 'Play on' }];
   if (!devs.length) items.push({ label: 'No devices: open Spotify somewhere', icon: 'warning', run: () => api.open_spotify() });
-  for (const d of devs) items.push({ label: d.name + (d.active ? '  (playing)' : ''), icon: d.type === 'computer' ? 'computer' : d.type === 'smartphone' ? 'phone' : 'speaker', on: d.active, run: async () => { if (!d.restricted) { await api.transfer(d.id); toast(`Playing on ${d.name}`, 'speaker'); } } });
+  const pl = (S.state && S.state.player) || {};
+  const mine = d => (pl.deviceId && d.id === pl.deviceId) || d.name === (pl.name || 'Non Stop Pop DJ');
+  devs.sort((a, b) => mine(b) - mine(a));
+  for (const d of devs) items.push({ label: (mine(d) ? 'This app (built-in player)' : d.name) + (d.active ? '  (playing)' : ''), icon: mine(d) ? 'headphones' : d.type === 'computer' ? 'computer' : d.type === 'smartphone' ? 'phone' : 'speaker', on: d.active, run: async () => { if (!d.restricted) { await api.transfer(d.id); toast(mine(d) ? 'Playing in this app' : `Playing on ${d.name}`, 'speaker'); } } });
+  if (pl.mode === 'app' && pl.ready && !devs.some(mine)) items.push({ label: 'This app (built-in player)', icon: 'headphones', run: async () => { await api.use_builtin(); toast('Playing in this app', 'speaker'); } });
+  if (pl.mode === 'app' && !pl.ready) items.push({ label: pl.status === 'starting' ? 'This app: starting…' : 'This app: not available', icon: 'headphones', run: () => settingsSheet() });
   items.push('-', { label: "Cara's voice comes out of this PC", icon: 'mic', run: () => {} });
   showMenu(items, x, y);
 }
@@ -821,6 +829,11 @@ function settingsSheet() {
     <div class="group"><div class="account-row"><div class="avatar" style="${me && me.image ? `background-image:url('${esc(me.image)}')` : ''}">${me && me.image ? '' : icon('person', 24)}</div>
       <div class="ell" style="flex:1"><b class="ell">${esc(me ? me.name : s.connected ? 'Connected' : 'Not connected')}</b><span class="muted">${s.connected ? 'Spotify connected' : s.connecting ? 'Connecting…' : 'Spotify not connected'}</span></div>
       <button class="pill secondary small" data-set="reconnect">Reconnect</button>${s.connected ? '<button class="pill secondary small" data-set="logout">Log out</button>' : ''}</div></div>
+    <div class="group"><div class="caps">Where your music plays</div>
+      <div class="seg">${[['app', 'This app'], ['spotify', 'Spotify app']].map(([v, l]) => `<button class="${(c.player || 'app') === v ? 'on' : ''}" data-player="${v}">${l}</button>`).join('')}</div>
+      <div class="note">${(c.player || 'app') === 'app'
+        ? `Music plays right here, no Spotify app needed (Spotify Premium only). ${esc(playerNote(s.player))}`
+        : 'Music plays in the Spotify app, on this PC or any other device, and this app controls it.'}</div></div>
     <div class="group"><div class="caps">Spotify app</div>
       ${field('Client ID', 'spotify_client_id', { ph: 'Paste it here' })}
       ${field('Client Secret', 'spotify_client_secret', { secret: true, ph: 'Paste it here' })}
@@ -844,6 +857,8 @@ function settingsSheet() {
   });
   w.addEventListener('click', async e => {
     const rv = e.target.closest('[data-reveal]'); if (rv) { const i = rv.parentElement.querySelector('input'); i.type = i.type === 'password' ? 'text' : 'password'; return; }
+    const pb = e.target.closest('[data-player]');
+    if (pb) { await setConfig({ player: pb.dataset.player }); closeSheet(); settingsSheet(); return; }
     const b = e.target.closest('[data-set]'); if (!b) return;
     const what = b.dataset.set;
     if (what === 'reconnect') { await api.connect(true); toast('A browser tab opens: click Agree', 'link'); closeSheet(); }
@@ -853,6 +868,14 @@ function settingsSheet() {
     if (what === 'copy-redirect') copy(S.boot.redirect);
     if (what === 'welcome') { closeSheet(); showWelcome(true); }
   });
+}
+
+function playerNote(p) {
+  p = p || {};
+  if (p.status === 'ready') return `Ready (it runs in a hidden ${p.browser || 'Edge'} window).`;
+  if (p.status === 'starting') return p.problem || 'Starting…';
+  if (p.status === 'premium' || p.status === 'error') return p.problem || '';
+  return '';
 }
 
 // ---------------------------------------------------------------- everything you can click
@@ -912,6 +935,8 @@ const ACTIONS = {
   'search-scope': el => { S.search.scope = el.dataset.scope; if (S.route.name !== 'search') tab('search'); runSearch(); },
   'lyric': el => { api.player('seek', +el.dataset.t); S.state.now.progress = +el.dataset.t; S.state.now.stamp = Date.now(); S.np.userScrolled = false; },
   'vis-open': () => Vis.open(),
+  'player-mode': el => setConfig({ player: el.dataset.mode }).then(() => toast(el.dataset.mode === 'app' ? 'Music plays in this app' : 'Music plays in the Spotify app', 'speaker')),
+  'player-retry': () => api.player_retry().then(() => toast('Starting the built-in player', 'speaker')),
 };
 async function setConfig(patch) {
   Object.assign(S.config, patch);

@@ -46,6 +46,7 @@ class Listener:
         self.onset = (_bin(30), _bin(250))
         self.spec = np.zeros(BANDS, np.float32)
         self.wave = np.zeros(512, np.float32)
+        self.wave1k = np.zeros(1024, np.float32)       # full-rate, for MilkDrop presets
         self.bass = self.mid = self.treb = self.vol = 0.0
         self.beats = 0
         self._reset()
@@ -180,6 +181,7 @@ class Listener:
         norm = (0.55 * shape + 0.45 * swing) * present
         spec = np.maximum(norm, self.spec * 0.84)                        # bars fall back gently
         wave = buf[-1024::2] / (self._loud * 3.0)
+        wave1k = buf[-1024:] / (self._loud * 3.5)
         with self.lock:
             self.spec = spec.astype(np.float32)
             self.bass = self.bass * 0.4 + bass * 0.6
@@ -187,6 +189,7 @@ class Listener:
             self.treb = self.treb * 0.5 + treb * 0.5
             self.vol = min(1.0, rms / self._loud) ** 0.7 * present
             self.wave = np.clip(wave, -1, 1)
+            self.wave1k = np.clip(wave1k, -1, 1)
             if beat:
                 self.beats += 1
                 self._last_beat = now
@@ -198,10 +201,12 @@ class Listener:
             self.start()
         with self.lock:
             wave = ((self.wave + 1) * 127.5).astype(np.uint8).tobytes()
+            wave1k = ((self.wave1k + 1) * 127.5).astype(np.uint8).tobytes()
             spec = (np.clip(self.spec, 0, 1) * 255).astype(np.uint8).tobytes()
             return {"live": self.live, "bass": round(self.bass, 3), "mid": round(self.mid, 3), "treb": round(self.treb, 3),
                     "vol": round(self.vol, 3), "beats": self.beats, "device": self.device, "problem": self.error,
-                    "wave": base64.b64encode(wave).decode(), "spec": base64.b64encode(spec).decode()}
+                    "wave": base64.b64encode(wave).decode(), "spec": base64.b64encode(spec).decode(),
+                    "wave1k": base64.b64encode(wave1k).decode()}
 
 
 LISTENER = Listener()

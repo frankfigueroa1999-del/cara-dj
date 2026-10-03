@@ -21,6 +21,7 @@ import webbrowser
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pc_audio  # noqa: E402  (listens to the speakers only while the visualizer is open)
+import pc_player  # noqa: E402  (the built-in player: music plays from the app, no Spotify app needed)
 import pc_spotify  # noqa: E402  (plain module: nothing in it talks to Spotify until the app connects)
 
 APP_NAME = "Non Stop Pop DJ"
@@ -30,6 +31,13 @@ os.makedirs(APP_DIR, exist_ok=True)
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 CACHE_PATH = os.path.join(APP_DIR, "spotify_token.cache")
 REDIRECT_URI = "http://127.0.0.1:8888/callback"
+PRESETS_DIR = os.path.join(APP_DIR, "presets")             # your MilkDrop presets (.milk), any folders inside
+PRESET_CACHE = os.path.join(APP_DIR, "presets_converted")  # each one converted once, then kept here
+PRESETS_README = (
+    "Drop MilkDrop presets in this folder: .milk files, or whole folders of them (Cream of the Crop,\n"
+    "projectM packs and so on). They join the visualizer's rotation the next time you open it.\n\n"
+    "In the visualizer, press M (or click the Mix button) to play only MilkDrop presets.\n"
+    "Classic MilkDrop 2 presets work. MilkDrop 3's double presets (.milk2) don't.\n")
 HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -75,6 +83,7 @@ DEFAULTS = {
     "cohost_swears": True,
     "cohost_voice": "",
     "recent_searches": [],
+    "player": "app",            # where music plays: "app" (the built-in player) or "spotify" (the Spotify app, any device)
 }
 TRANSITION_WEIGHTS = {"talkover": 4, "intro": 3, "silent": 3, "fadeout": 2}
 SECRET_KEYS = ("spotify_client_secret", "elevenlabs_api_key", "gemini_api_key")
@@ -201,6 +210,7 @@ class App:
         self.sleep_uri = None
         self.window = None
         self.poke = threading.Event()
+        self.player = pc_player.Player(APP_DIR, os.path.join(HERE, "ui", "player.html"), self.player_token, self.player_changed)
         threading.Thread(target=self.poll_loop, daemon=True).start()
         if self.cfg["spotify_client_id"] and self.cfg["spotify_client_secret"]:
             if not self.cfg.get("welcomed"):
@@ -228,6 +238,10 @@ class App:
                 v = str(v or "").strip()
             if k in ("spotify_client_id", "spotify_client_secret") and v != self.cfg.get(k):
                 keys_changed = True
+            if k == "player" and v not in ("app", "spotify"):
+                continue
+            if k == "player" and v != self.cfg.get(k) and self.connected:
+                threading.Thread(target=self.player.start if v == "app" else self.leave_builtin, daemon=True).start()
             self.cfg[k] = v
         c = self.cfg
         c["break_min"] = max(1, min(10, int(c["break_min"])))
@@ -318,6 +332,8 @@ class App:
                 self.connected = True
                 pc_spotify.forget_home()
                 print("Connected to Spotify.")
+                if self.cfg.get("player", "app") == "app":
+                    self.player.start()
             except Exception as e:
                 self.connected = False
                 msg = str(e)
@@ -338,6 +354,7 @@ class App:
     def logout(self):
         if self.dj_running():
             self.dj.STOP.set()
+        threading.Thread(target=self.player.stop, daemon=True).start()
         try:
             os.remove(CACHE_PATH)
         except OSError:
@@ -350,6 +367,41 @@ class App:
 
     def dj_running(self):
         return self.dj_thread is not None and self.dj_thread.is_alive()
+
+    # ------------------------------------------------------------ the built-in player
+    def player_token(self):
+        if not (self.connected and self.dj is not None):
+            return None
+        return self.dj.sp.auth_manager.get_access_token(as_dict=False)
+
+    def player_changed(self, status):
+        if status == "ready" and self.cfg.get("player", "app") == "app":
+            threading.Thread(target=self.use_builtin, daemon=True).start()
+        self.poke.set()
+
+    def leave_builtin(self):
+        """Switching to the Spotify app: hand the music over first (if the Spotify app is open), then stop the player."""
+        n = self.now or {}
+        if self.player.device_id and (n.get("device") or {}).get("id") == self.player.device_id:
+            devs = [d for d in pc_spotify.devices() if d["id"] != self.player.device_id and not d["restricted"]]
+            pick = next((d for d in devs if d["type"] == "computer"), None) or (devs[0] if devs else None)
+            if pick:
+                pc_spotify.safe(lambda: pc_spotify.put("me/player", payload={"device_ids": [pick["id"]], "play": bool(n.get("playing"))}))
+        self.player.stop()
+        self.poke.set()
+
+    def use_builtin(self, force=False):
+        """Point Spotify at the built-in player, unless music is already playing on another device (or when asked)."""
+        dev = self.player.device_id
+        if not (dev and self.connected):
+            return False
+        n = self.now or {}
+        if not force and n.get("playing") and (n.get("device") or {}).get("id") not in (None, dev):
+            return False
+        keep = bool(n.get("playing"))
+        ok = pc_spotify.safe(lambda: pc_spotify.put("me/player", payload={"device_ids": [dev], "play": keep}) or True, False)
+        threading.Timer(0.8, self.poke.set).start()
+        return bool(ok)
 
     def toggle_dj(self):
         if self.dj_running():
@@ -518,12 +570,18 @@ class App:
     def play(self, context=None, offset_uri=None, uris=None, position=None, shuffle=None):
         if not (self.connected and self.dj is not None):
             return "Connect Spotify first."
-        dev = ((self.now or {}).get("device") or {}).get("id")
+        n = self.now or {}
+        dev = (n.get("device") or {}).get("id")
+        builtin = self.player.device_id if (self.cfg.get("player", "app") == "app" and self.player.status == "ready") else None
+        if builtin and not (n.get("playing") and dev and dev != builtin):
+            dev = builtin                 # play in this app, unless music is already playing on another device
         if not dev:
             devs = pc_spotify.devices()
             pick = next((d for d in devs if d["active"]), None) or next((d for d in devs if d["type"] == "computer"), None) or (devs[0] if devs else None)
             dev = pick["id"] if pick else None
             if not dev:
+                if self.cfg.get("player", "app") == "app" and self.player.status == "starting":
+                    return "The built-in player is still starting. Try again in a few seconds."
                 return "Spotify isn't open anywhere. Open the Spotify app on this PC, then try again."
         body = {}
         if context:
@@ -593,6 +651,7 @@ class App:
                 "queued": self.queued if running else None,
             },
             "sleep": {"at": int(self.sleep_at * 1000) if self.sleep_at else None, "endOfSong": self.sleep_end_of_song},
+            "player": dict(self.player.info(), mode=self.cfg.get("player", "app")),
             "logCount": count,
             "serverTime": int(time.time() * 1000),
         }
@@ -601,6 +660,10 @@ class App:
         try:
             if self.dj is not None:
                 self.dj.STOP.set()
+        except Exception:
+            pass
+        try:
+            self.player.stop()
         except Exception:
             pass
 
@@ -703,6 +766,19 @@ class Api:
         return pc_spotify.devices()
 
     @guard
+    def player_retry(self):
+        self._app.player.retries = []
+        self._app.player.problem = ""
+        threading.Thread(target=self._app.player.start, daemon=True).start()
+        return True
+
+    @guard
+    def use_builtin(self):
+        if self._app.player.status != "ready":
+            return False
+        return self._app.use_builtin(force=True)
+
+    @guard
     def transfer(self, device_id):
         ok = pc_spotify.safe(lambda: pc_spotify.put("me/player", payload={"device_ids": [device_id], "play": True}) or True, False)
         threading.Timer(0.8, self._app.poke.set).start()
@@ -803,6 +879,85 @@ class Api:
     def about(self, track):
         return pc_spotify.about(track)
 
+    # MilkDrop presets you add
+    @staticmethod
+    def _preset_path(rel):
+        full = os.path.realpath(os.path.join(PRESETS_DIR, rel or ""))
+        if not full.startswith(os.path.realpath(PRESETS_DIR) + os.sep):
+            raise ValueError("that file isn't in the presets folder")
+        return full
+
+    @staticmethod
+    def _cache_file(rel):
+        import hashlib
+        return os.path.join(PRESET_CACHE, hashlib.sha1(rel.replace("\\", "/").lower().encode("utf-8")).hexdigest() + ".json")
+
+    @guard
+    def milk_list(self):
+        os.makedirs(PRESETS_DIR, exist_ok=True)
+        items = []
+        for folder, _dirs, files in os.walk(PRESETS_DIR):
+            for f in files:
+                if not f.lower().endswith((".milk", ".json")):
+                    continue
+                full = os.path.join(folder, f)
+                rel = os.path.relpath(full, PRESETS_DIR)
+                mtime = int(os.path.getmtime(full))
+                failed = False
+                try:
+                    with open(self._cache_file(rel), encoding="utf-8") as c:
+                        cached = json.load(c)
+                    failed = bool(cached.get("error")) and cached.get("mtime") == mtime
+                except Exception:
+                    pass
+                items.append({"path": rel, "name": os.path.splitext(f)[0], "mtime": mtime, "failed": failed})
+                if len(items) >= 20000:
+                    break
+        return {"folder": PRESETS_DIR, "items": items}
+
+    @guard
+    def milk_get(self, rel):
+        full = self._preset_path(rel)
+        mtime = int(os.path.getmtime(full))
+        if full.lower().endswith(".json"):
+            with open(full, encoding="utf-8") as f:
+                preset = json.load(f)
+            if not isinstance(preset, dict) or "baseVals" not in preset:
+                return {"error": "that .json isn't a Butterchurn preset"}
+            return {"preset": preset, "mtime": mtime}
+        try:
+            with open(self._cache_file(rel), encoding="utf-8") as c:
+                cached = json.load(c)
+            if cached.get("mtime") == mtime and cached.get("preset"):
+                return {"preset": cached["preset"], "mtime": mtime}
+        except Exception:
+            pass
+        with open(full, encoding="latin-1") as f:          # MilkDrop presets are plain Windows text
+            text = f.read()
+        if "[preset00]" not in text:
+            return {"error": "that file isn't a MilkDrop preset"}
+        return {"text": text, "mtime": mtime}
+
+    @guard
+    def milk_save(self, rel, mtime, preset=None, error=""):
+        self._preset_path(rel)
+        os.makedirs(PRESET_CACHE, exist_ok=True)
+        with open(self._cache_file(rel), "w", encoding="utf-8") as c:
+            json.dump({"mtime": int(mtime or 0), "preset": preset, "error": error or ""}, c)
+        if error:
+            print(f"[visualizer: skipped your preset {os.path.basename(rel)} ({error})]")
+        return True
+
+    @guard
+    def open_presets(self):
+        os.makedirs(PRESETS_DIR, exist_ok=True)
+        readme = os.path.join(PRESETS_DIR, "README.txt")
+        if not os.path.exists(readme):
+            with open(readme, "w", encoding="utf-8") as f:
+                f.write(PRESETS_README)
+        open_path(PRESETS_DIR)
+        return PRESETS_DIR
+
     # the visualizer
     @guard
     def vis_frame(self):
@@ -876,11 +1031,24 @@ def self_test(path):
         if sys.platform == "win32":
             import clr  # noqa: F401  (pythonnet: the window's bridge to Windows)
             from webview.platforms import winforms  # noqa: F401  (the Edge WebView2 window and its DLLs)
-        for name in ("index.html", "style.css", "app.js", "icons.js", "vis.js"):
+        for name in ("index.html", "style.css", "app.js", "icons.js", "vis.js", "player.html", "vendor/butterchurn.min.js",
+                     "vendor/milk-utils.min.js", "vendor/hlslparser.js", "presets/pack.json", "presets/images.json"):
             if not os.path.exists(os.path.join(HERE, "ui", name)):
                 raise RuntimeError(f"the screen file ui/{name} is missing")
+        with open(os.path.join(HERE, "ui", "presets", "pack.json"), encoding="utf-8") as f:
+            if len(json.load(f)) < 400:
+                raise RuntimeError("the MilkDrop preset pack is incomplete")
         app = App()
         api = Api(app)
+        # the built-in player: Edge (or Chrome) is there, and the page's little server answers (no browser is opened)
+        if sys.platform == "win32" and not pc_player.find_browser()[1]:
+            raise RuntimeError("couldn't find Microsoft Edge for the built-in player")
+        import urllib.request
+        page = app.player._serve()
+        ping = page.replace("/player?", "/ping?")
+        with urllib.request.urlopen(urllib.request.Request(ping, headers={"Host": f"127.0.0.1:{app.player.port}"}), timeout=10) as r:
+            if json.loads(r.read()).get("name") != pc_player.NAME:
+                raise RuntimeError("the built-in player's page server didn't answer")
         s = api.state()
         if "error" in s or "dj" not in s:
             raise RuntimeError(f"state() failed: {s}")

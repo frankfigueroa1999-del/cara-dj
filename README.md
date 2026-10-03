@@ -11,9 +11,18 @@ Your keys (Spotify, ElevenLabs, Gemini) go in Settings once and are saved on you
 the folder that **Open folder** shows.
 
 It's the iPhone app laid out for a big screen: Home, Cara's page, your Library, Search, album /
-artist / playlist pages, and a big player with synced lyrics, Up Next and About. Press **V** for the
-built-in visualizer: ten trippy scenes (tunnels, kaleidoscopes, fractals, hyperspace) drawn on your
-graphics card, moving to whatever your speakers play. Nothing extra to install.
+artist / playlist pages, and a big player with synced lyrics, Up Next and About.
+
+**Standalone:** music plays right in the app, no Spotify app needed. It uses Spotify's own Web
+Playback SDK (Spotify Premium only) in a hidden Microsoft Edge window, because the app's window can't
+play Spotify's protected audio (`pc_player.py`, `ui/player.html`). Settings > Where your music plays
+switches back to the Spotify app.
+
+**Visualizer:** press **V**. Ten trippy scenes of its own (tunnels, kaleidoscopes, fractals,
+hyperspace) plus 481 MilkDrop presets through Butterchurn, all moving to whatever your speakers play.
+Drop your own `.milk` presets (Cream of the Crop, projectM packs...) into its presets folder and they
+join the rotation. `ui/vendor` holds Butterchurn, the preset tools and projectM's HLSL converter
+(built by `.github/workflows/vendor.yml`, with a fix); `ui/presets` holds the bundled pack.
 
 The window is drawn by Microsoft Edge WebView2 (`ui/` holds the page, its styles and scripts; `vis.js`
 is the visualizer). Python (`dj_app.py`) runs Cara, talks to Spotify (`pc_spotify.py`) and listens to
