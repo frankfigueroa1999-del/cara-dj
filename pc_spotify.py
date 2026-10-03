@@ -4,6 +4,8 @@ shaped into small plain dicts the window can draw. Uses the same Spotify endpoin
 
 `sp` is the DJ engine's spotipy client; the app sets it once Spotify is connected.
 """
+import json
+import os
 import random
 import re
 import threading
@@ -46,10 +48,78 @@ def safe(fn, default=None):
     """Runs one Spotify request; a failure gives `default` (and a line in Activity) instead of an error."""
     try:
         return fn()
+    except SlowDown:
+        return default                                   # waiting out Spotify's limit: said once already
     except Exception as e:
         status = getattr(e, "http_status", None)
         print(f"Spotify said no ({status or 'no answer'}): {str(e)[:200]}")
         return default
+
+
+# ---------------------------------------------------------------- when Spotify says "slow down"
+# Spotify counts each developer app's requests over a rolling half minute: one count for everyone using the same
+# Client ID. When it answers 429 ("too many requests"), every request from this app (and from Cara) waits: as long as
+# Spotify says, at least 30 seconds, and longer each time it happens again soon after. Asking anyway only keeps the
+# limit going. What's playing is also asked for once and shared, rather than separately by the app and by Cara.
+_limit = {"until": 0.0, "strikes": 0, "last": 0.0}
+_shared = {"at": 0.0, "value": None}
+
+
+class SlowDown(Exception):
+    http_status = 429
+
+    def __init__(self, wait):
+        super().__init__(f"Spotify asked this app to slow down; asking again in {int(wait) + 1} s")
+        self.wait = wait
+
+
+def limited():
+    """Seconds left before the app may ask Spotify anything again (0 when it can)."""
+    return max(0.0, _limit["until"] - time.time())
+
+
+def _note_limit(retry_after):
+    now = time.time()
+    if now - _limit["last"] > 900:
+        _limit["strikes"] = 0                            # it's been a while: start over
+    _limit["strikes"] = min(_limit["strikes"] + 1, 6)
+    _limit["last"] = now
+    wait = min(max(retry_after, 30 * 2 ** (_limit["strikes"] - 1)), 3600)    # 30 s, 1, 2, 4, 8, 16 minutes
+    if now + wait > _limit["until"]:
+        _limit["until"] = now + wait
+        print(f"Spotify asked the app to slow down (too many requests): waiting {int(wait)} s before asking again.")
+
+
+def guard(client):
+    """Every request (the app's and Cara's) goes through here."""
+    if getattr(client, "_nsp_guarded", False):
+        return client
+    orig = client._internal_call
+
+    def call(method, url, payload, params):
+        left = limited()
+        if left:
+            raise SlowDown(left)
+        mine = method == "GET" and url.rstrip("/").endswith("me/player")
+        if mine and time.time() - _shared["at"] < 0.9 and _shared["value"] is not None:
+            return _shared["value"]                      # asked a moment ago (by the app or by Cara): the same answer
+        try:
+            got = orig(method, url, payload, params)
+        except Exception as e:
+            if getattr(e, "http_status", None) == 429:
+                try:
+                    ra = int((getattr(e, "headers", None) or {}).get("Retry-After") or 0)
+                except (TypeError, ValueError):
+                    ra = 0
+                _note_limit(ra)
+            raise
+        if mine:
+            _shared.update(at=time.time(), value=got)
+        return got
+
+    client._internal_call = call
+    client._nsp_guarded = True
+    return client
 
 
 # ---------------------------------------------------------------- shapes
@@ -310,9 +380,11 @@ _home = {"at": 0, "value": None}
 
 
 def home(force=False):
-    """Everything on Home (and the sidebar's playlists), cached for a few minutes."""
+    """Everything on Home (and the sidebar's playlists), cached for a few minutes (and never redone more often than
+    every 20 seconds, however often something changes)."""
     with _lock:
-        if not force and _home["value"] and time.time() - _home["at"] < 300:
+        age = time.time() - _home["at"]
+        if _home["value"] and (age < 20 or (not force and age < 300)):
             return _home["value"]
     out = {}
 
@@ -1144,19 +1216,61 @@ def _artist_albums(aid, group, limit):
     return [x for x in (album(i) for i in r.get("items") or []) if x]
 
 
-def _parallel(jobs, timeout=20):
-    """Runs (key, fn) jobs side by side; gives {key: result}."""
-    out = {}
+def _parallel(jobs, timeout=20, workers=3):
+    """Runs (key, fn) jobs a few at a time (not all at once: Spotify counts requests); gives {key: result}."""
+    out, todo, lock = {}, list(jobs), threading.Lock()
 
-    def run(k, fn):
-        out[k] = fn()
+    def run():
+        while True:
+            with lock:
+                if not todo:
+                    return
+                k, fn = todo.pop(0)
+            try:
+                out[k] = fn()
+            except Exception:
+                out[k] = None
 
-    threads = [threading.Thread(target=run, args=j, daemon=True) for j in jobs]
+    threads = [threading.Thread(target=run, daemon=True) for _ in range(min(workers, len(todo)) or 1)]
     for th in threads:
         th.start()
+    end = time.time() + timeout * max(1, len(jobs) / max(1, workers) / 4)
     for th in threads:
-        th.join(timeout)
+        th.join(max(0.1, end - time.time()))
     return out
+
+
+CACHE_DIR = None      # the app sets this: Home's sections are kept on disk for a few hours (opening the app asks less)
+
+
+def _feed_file():
+    return os.path.join(CACHE_DIR, "home-feed.json") if CACHE_DIR else None
+
+
+def _save_feed(value):
+    path = _feed_file()
+    if not path:
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"at": time.time(), "user": (me() or {}).get("id"), "value": value, "mixdefs": _mixdefs}, f)
+    except Exception:
+        pass
+
+
+def _load_feed():
+    path = _feed_file()
+    try:
+        with open(path, encoding="utf-8") as f:
+            j = json.load(f)
+    except Exception:
+        return None
+    if time.time() - (j.get("at") or 0) > 6 * 3600 or not j.get("value") or j.get("user") != (me() or {}).get("id"):
+        return None
+    _mixdefs.update(j.get("mixdefs") or {})
+    with _lock:
+        _feed.update(at=j["at"], value=j["value"])
+    return j["value"]
 
 
 def home_feed(force=False):
@@ -1165,6 +1279,10 @@ def home_feed(force=False):
     with _lock:
         if not force and _feed["value"] and time.time() - _feed["at"] < 1800:
             return _feed["value"]
+    if not force and not _feed["value"]:
+        saved = _load_feed()
+        if saved:
+            return saved
     h = home()
     j = safe(lambda: get("me/top/artists", limit=40, time_range="medium_term")) or {}
     arts = [a for a in (artist(x) for x in j.get("items") or []) if a]
@@ -1242,10 +1360,10 @@ def home_feed(force=False):
 
     # new releases from artists you follow and play most (the last few months): their latest singles and albums
     who = []
-    for a in followed[:7] + arts:
+    for a in followed[:5] + arts:
         if a["id"] not in {b["id"] for b in who}:
             who.append(a)
-        if len(who) >= 14:
+        if len(who) >= 10:
             break
     jobs = [((a["id"], "single"), (lambda a=a: _artist_albums(a["id"], "single", 3))) for a in who]
     jobs += [((a["id"], "album"), (lambda a=a: _artist_albums(a["id"], "album", 4))) for a in who]
@@ -1270,7 +1388,7 @@ def home_feed(force=False):
         albums = (got.get((a["id"], "album")) or [])[:3]
         mine = [b for b in arts if b is not a and set(b["genres"]) & set(a["genres"])][:4]
         ids = {a["id"]} | {b["id"] for b in mine}
-        extra = [x for x in (got.get(("alike", a["id"])) or []) if x["id"] not in ids and x["id"] not in known][:5]
+        extra = [x for x in (got.get(("alike", a["id"])) or []) if x["id"] not in ids and x["id"] not in known][:3]
         looked = _parallel([(x["id"], (lambda x=x: artist(safe(lambda: get(f"artists/{x['id']}"))))) for x in extra], 15)
         alike = [looked[x["id"]] for x in extra if looked.get(x["id"])]
         st = next((m for m in stations if m["id"] == "station:" + a["id"]), None)
@@ -1291,6 +1409,7 @@ def home_feed(force=False):
     out["big"] = big
     with _lock:
         _feed.update(at=time.time(), value=out)
+    _save_feed(out)
     return out
 
 
@@ -1298,6 +1417,10 @@ def forget_feed():
     with _lock:
         _feed.update(at=0, value=None)
     _mixes.clear()
+    try:
+        os.remove(_feed_file() or "")
+    except OSError:
+        pass
 
 
 def _top_tracks(span):

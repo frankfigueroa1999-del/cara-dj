@@ -364,7 +364,8 @@ class App:
             self.dj = importlib.import_module("live_dj_free")
         else:
             self.dj = importlib.reload(self.dj)
-        pc_spotify.sp = self.dj.sp
+        pc_spotify.sp = pc_spotify.guard(self.dj.sp)     # waits out Spotify's "slow down", for the app and Cara alike
+        pc_spotify.CACHE_DIR = APP_DIR
         self.dj.QUEUE_FILTER = self.filter_queue    # Cara won't announce a song you took out of the queue
         self.apply_settings()
 
@@ -596,10 +597,13 @@ class App:
     def poll_loop(self):
         last_err, last_note, empty_since, last_uri = None, None, None, None
         while True:
-            self.poke.wait(1.5)
+            n = self.now or {}
+            self.poke.wait(1.5 if n.get("playing") else 4.0)     # paused: Spotify is asked less often
             self.poke.clear()
             if not (self.connected and self.dj is not None):
                 continue
+            if pc_spotify.limited():
+                continue                                       # Spotify asked the app to slow down: wait it out
             try:
                 pb = pc_spotify.playback()
                 if last_err:
@@ -851,6 +855,12 @@ class App:
         if not (self.connected and self.dj is not None):
             return "Connect Spotify first."
         n = self.now or {}
+        d = (n.get("device") or {}).get("id")
+        b = self.builtin
+        here = d and d == b.device_id and b.status == "ready" and action in ("toggle", "play", "pause", "next", "previous", "seek", "volume")
+        if pc_spotify.limited() and not here:            # the built-in player still answers: it doesn't ask Spotify's servers
+            return f"Spotify asked the app to slow down. Try again in {int(pc_spotify.limited()) + 1} seconds."
+        n = self.now or {}
         dev = (n.get("device") or {}).get("id")
         q = {"device_id": dev} if dev else {}
         b = self.builtin
@@ -922,6 +932,8 @@ class App:
     def play(self, context=None, offset_uri=None, uris=None, position=None, shuffle=None):
         if not (self.connected and self.dj is not None):
             return "Connect Spotify first."
+        if pc_spotify.limited():
+            return f"Spotify asked the app to slow down. Try again in {int(pc_spotify.limited()) + 1} seconds."
         n = self.now or {}
         dev = (n.get("device") or {}).get("id")
         builtin = self.builtin.device_id if (self.cfg.get("player", "app") == "app" and self.builtin.status == "ready") else None
@@ -1041,6 +1053,7 @@ class App:
             "player": dict(self.builtin.info(), mode=self.cfg.get("player", "app")),
             "output": pc_audio.output_name(),          # Windows' playback device: where this app's music and Cara go
             "notice": self.notice,
+            "slow": int(pc_spotify.limited()),         # seconds until the app may ask Spotify again (it said "slow down")
             "logCount": count,
             "serverTime": int(time.time() * 1000),
         }

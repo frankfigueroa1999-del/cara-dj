@@ -266,7 +266,9 @@ sp = spotipy.Spotify(
     auth_manager=SpotifyOAuth(
         scope=os.environ.get("DJ_SCOPES") or "user-read-playback-state user-modify-playback-state",
         cache_path=os.environ.get("DJ_CACHE_PATH") or None,
-    )
+    ),
+    retries=2, status_retries=2, backoff_factor=0.5,
+    status_forcelist=(500, 502, 503, 504),     # a "too many requests" (429) is never retried on the spot: the app waits
 )
 pygame.mixer.init()
 
@@ -1895,6 +1897,10 @@ def main():
                 pb = sp.current_playback()
                 t1 = time.time()
             except Exception as e:
+                wait = getattr(e, "wait", None)
+                if wait:                       # the app is waiting out Spotify's limit: wait quietly too
+                    time.sleep(min(wait, 10))
+                    continue
                 print("Spotify error:", e)
                 time.sleep(3)
                 continue
