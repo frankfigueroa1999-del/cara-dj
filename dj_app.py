@@ -235,6 +235,12 @@ class App:
         self.problem = ""
         self.problem_kind = ""      # "unregistered": Spotify doesn't know this account (the banner offers the dashboard)
         self.later = None           # connects again by itself after Spotify's "slow down"
+        self.raw, self.raw_at = None, 0.0       # Spotify's last answer to "what's playing", and when (shared with Cara)
+        self.net_lock = threading.Lock()
+        self.last_ask = 0.0
+        self.devs_at = 0.0          # when Spotify's device list was last asked for (to explain why nothing plays)
+        self.idle_since = None      # nothing playing since: the app looks less and less often
+        self.burst_until = 0.0      # just after a button or a new song: the app looks again a few times, quickly
         self.hint = ""              # "no-device" when Spotify has nowhere to play
         self.now = None             # latest playback snapshot (pc_spotify.playback())
         self.context_name = ""
@@ -257,6 +263,7 @@ class App:
         self.qlock = threading.Lock()
         self.played_at = 0.0            # when you last started something yourself (its first song is never skipped)
         self.builtin.on_skipped = self.queue_skipped
+        self.builtin.on_state = self.poke.set       # the built-in player says what's playing: show it right away
         self.notice, self.notice_n = None, 0
         if not self.cfg.get("player_rechecked"):
             # Before, the built-in player's hidden window loaded no sound, so many switched to the Spotify app.
@@ -369,6 +376,8 @@ class App:
         pc_spotify.sp = pc_spotify.guard(self.dj.sp)     # waits out Spotify's "slow down", for the app and Cara alike
         pc_spotify.CACHE_DIR = APP_DIR
         self.dj.QUEUE_FILTER = self.filter_queue    # Cara won't announce a song you took out of the queue
+        self.dj.PLAYBACK = self.engine_playback     # Cara reads what's playing through the app (one request, or none)
+        self.dj.VOLUME = self.engine_volume         # and fades the built-in player itself
         self.apply_settings()
 
     def connect(self, force=False):
@@ -388,7 +397,8 @@ class App:
         def work():
             try:
                 self.load_engine()
-                self.dj.sp.current_playback()  # triggers the login the first time (a browser tab opens)
+                self.raw_at = 0.0
+                self.net_raw()                 # triggers the login the first time (a browser tab opens)
                 self.connected = True
                 pc_spotify.forget_home()
                 print("Connected to Spotify.")
@@ -399,7 +409,11 @@ class App:
                 msg = str(e)
                 low = msg.lower()
                 wait = pc_spotify.limited() if getattr(e, "http_status", None) == 429 else 0
-                if wait:
+                if wait and pc_spotify.quota_out():
+                    self.problem = ("Spotify's request quota for your developer account is used up (every app made on that account, and "
+                                    f"everyone using them, counts together). It connects by itself at {pc_spotify.clock(time.time() + wait)}.")
+                    self.connect_later(wait + 2)
+                elif wait:
                     self.problem = ("Spotify asked this app to slow down (too many requests from everyone using this Client ID). "
                                     f"It connects by itself in about {int(wait // 60) + 1} min.")
                     self.connect_later(wait + 2)
@@ -623,42 +637,132 @@ class App:
         print(f"[queued next transition: {style}]")
         return "ok"
 
-    # ------------------------------------------------------------ Spotify playback
+    # ------------------------------------------------------------ what's playing (asking Spotify as little as possible)
+    # Spotify counts every request against the developer account's quota. While the music plays in the built-in
+    # player, what's playing comes from the player itself: no request at all. Otherwise the app asks now and then (and
+    # right when a song should end), and Cara uses the same answer instead of asking again.
+    def sdk_raw(self):
+        """What's playing, in Spotify's own shape, from the built-in player's report; None when the music isn't there."""
+        b = self.builtin
+        st = b.playing_state()
+        t = (st or {}).get("track") or {}
+        if not t.get("uri") or (t.get("type") or "track") != "track":
+            return None
+        if st.get("contextName") and st.get("context") and st["context"] not in pc_spotify._names:
+            pc_spotify._names[st["context"]] = st["contextName"]
+        full = None if t["uri"].startswith("spotify:local:") else pc_spotify.details(t.get("id"))
+        item = full if full and full.get("name") else {
+            "uri": t["uri"], "id": t.get("id") or "", "name": t.get("name") or "", "type": "track",
+            "duration_ms": st.get("duration") or t.get("duration_ms") or 0,
+            "artists": t.get("artists") or [], "album": t.get("album") or {}}
+        playing = not st.get("paused")
+        dur = item.get("duration_ms") or st.get("duration") or 0
+        progress = (st.get("position") or 0) + ((time.time() - b.state_at) * 1000 if playing else 0)
+        ctx = st.get("context") or ""
+        return {
+            "is_playing": playing, "progress_ms": int(min(progress, dur) if dur else progress),
+            "shuffle_state": bool(st.get("shuffle")), "repeat_state": {1: "context", 2: "track"}.get(st.get("repeat"), "off"),
+            "context": {"uri": ctx} if ctx else None, "currently_playing_type": "track", "item": item,
+            "device": {"id": b.device_id, "name": pc_player.NAME, "type": "Computer", "is_active": True,
+                       "volume_percent": st.get("volume")},
+        }
+
+    def net_raw(self, fresh=0.0, floor=2.0):
+        """Spotify's answer to "what's playing" and when it was given: the last one if it's at most `fresh` seconds old,
+        otherwise asked now (but never more than once every `floor` seconds, however many ask)."""
+        with self.net_lock:
+            now = time.time()
+            if self.raw_at and (now - self.raw_at <= fresh or now - self.last_ask < floor):
+                return self.raw, self.raw_at
+            self.last_ask = now
+            j = pc_spotify.get("me/player", additional_types="track")    # raises when Spotify can't be asked
+            self.raw, self.raw_at = j or {}, (now + time.time()) / 2
+            return self.raw, self.raw_at
+
+    def engine_playback(self, fresh=15.0):
+        """For Cara: what's playing in spotipy's shape, as of now (an earlier answer is moved on to now)."""
+        raw = self.sdk_raw()
+        if raw is not None:
+            return raw
+        raw, at = self.net_raw(fresh)
+        if not raw or not raw.get("is_playing"):
+            return raw
+        j = dict(raw)
+        dur = (j.get("item") or {}).get("duration_ms") or 0
+        p = (j.get("progress_ms") or 0) + (time.time() - at) * 1000
+        j["progress_ms"] = int(min(p, dur) if dur else p)
+        return j
+
+    def engine_volume(self, v):
+        """Cara's fades: straight on the built-in player when the music plays there (no request to Spotify)."""
+        st = self.builtin.playing_state()
+        if not st or st.get("none"):
+            return False
+        try:
+            self.builtin.control("volume", v)
+            st["volume"] = int(v)
+            return True
+        except Exception:
+            return False
+
+    def next_look(self, n):
+        """Seconds until the app looks at what's playing again."""
+        st = self.builtin.playing_state()
+        if st and not st.get("none"):
+            self.idle_since = None
+            return 1.0                       # the built-in player says: looking costs nothing
+        if time.time() < self.burst_until:
+            return 1.2                       # something just changed (a button, a new song): look again soon
+        t = n.get("track") or {}
+        if n.get("playing") and t.get("duration"):
+            self.idle_since = None
+            left = t["duration"] - (n.get("progress") or 0) - (time.time() * 1000 - (n.get("stamp") or 0))
+            if left > 0:
+                return max(1.0, min(10.0, left / 1000 + 0.7))    # every 10 seconds, and right after the song ends
+            return 2.5                                           # it should have ended: Spotify's a moment behind
+        if self.idle_since is None:
+            self.idle_since = time.time()
+        return 15.0 if time.time() - self.idle_since < 300 else 45.0     # nothing playing: less and less often
+
     def poll_loop(self):
         last_err, last_note, empty_since, last_uri = None, None, None, None
         while True:
             n = self.now or {}
-            self.poke.wait(1.5 if n.get("playing") else 4.0)     # paused: Spotify is asked less often
+            woke = self.poke.wait(self.next_look(n))
             self.poke.clear()
+            if woke:
+                self.burst_until = time.time() + 3.5
             if not (self.connected and self.dj is not None):
                 continue
-            if pc_spotify.limited():
-                continue                                       # Spotify asked the app to slow down: wait it out
-            try:
-                pb = pc_spotify.playback()
-                if last_err:
-                    print("Spotify is answering again.")
-                    last_err = None
-            except Exception as e:
-                msg = str(e)
-                if msg != last_err:          # say it once, not every second
-                    last_err = msg
-                    print("Spotify did not answer:", msg[:300])
-                    low = msg.lower()
-                    if "403" in low or "forbidden" in low or "not registered" in low:
-                        print("Fix: in developer.spotify.com > your app > Settings > User Management, add the name and email of the Spotify account you signed in with, then in this app: Settings > Reconnect.")
-                    elif "401" in low or "token" in low:
-                        print("Fix: in Settings, press Reconnect Spotify and click Agree.")
-                    elif "429" in low:
-                        print("Spotify is rate limiting this app. It will work again in a few minutes.")
-                continue
+            raw, at = self.sdk_raw(), time.time()      # playing in the built-in player: no need to ask Spotify
+            if raw is None:
+                if pc_spotify.limited():
+                    continue                           # Spotify asked the app to wait: wait it out
+                try:
+                    raw, at = self.net_raw(fresh=0.8, floor=1.0)
+                    if last_err:
+                        print("Spotify is answering again.")
+                        last_err = None
+                except Exception as e:
+                    msg = str(e)
+                    if msg != last_err and getattr(e, "http_status", None) != 429:     # said once; a 429 explains itself
+                        last_err = msg
+                        print("Spotify did not answer:", msg[:300])
+                        low = msg.lower()
+                        if "403" in low or "forbidden" in low or "not registered" in low:
+                            print("Fix: in developer.spotify.com > your app > Settings > User Management, add the name and email of the Spotify account you signed in with, then in this app: Settings > Reconnect.")
+                        elif "401" in low or "token" in low:
+                            print("Fix: in Settings, press Reconnect Spotify and click Agree.")
+                    continue
+            pb = pc_spotify.shape(raw, at)
             self.check_sleep(pb)
             t = pb.get("track") if pb else None
             if not t:
                 self.now = self._settle(pb) or {}
                 if empty_since is None:
                     empty_since = time.time()
-                if time.time() - empty_since > 6:       # explain why, once per change
+                if time.time() - empty_since > 6 and time.time() - self.devs_at > 60:    # explain why (asked once a minute)
+                    self.devs_at = time.time()
                     devs = pc_spotify.devices()
                     if not devs:
                         self.hint = "no-device"
@@ -889,7 +993,7 @@ class App:
         b = self.builtin
         here = d and d == b.device_id and b.status == "ready" and action in ("toggle", "play", "pause", "next", "previous", "seek", "volume")
         if pc_spotify.limited() and not here:            # the built-in player still answers: it doesn't ask Spotify's servers
-            return f"Spotify asked the app to slow down. Try again in {int(pc_spotify.limited()) + 1} seconds."
+            return pc_spotify.wait_text()
         n = self.now or {}
         dev = (n.get("device") or {}).get("id")
         q = {"device_id": dev} if dev else {}
@@ -963,7 +1067,7 @@ class App:
         if not (self.connected and self.dj is not None):
             return "Connect Spotify first."
         if pc_spotify.limited():
-            return f"Spotify asked the app to slow down. Try again in {int(pc_spotify.limited()) + 1} seconds."
+            return pc_spotify.wait_text()
         n = self.now or {}
         dev = (n.get("device") or {}).get("id")
         builtin = self.builtin.device_id if (self.cfg.get("player", "app") == "app" and self.builtin.status == "ready") else None
@@ -1085,6 +1189,8 @@ class App:
             "output": pc_audio.output_name(),          # Windows' playback device: where this app's music and Cara go
             "notice": self.notice,
             "slow": int(pc_spotify.limited()),         # seconds until the app may ask Spotify again (it said "slow down")
+            "quota": pc_spotify.quota_out(),           # ...because the developer account's quota is used up
+            "slowAt": pc_spotify.clock(time.time() + pc_spotify.limited()),
             "logCount": count,
             "serverTime": int(time.time() * 1000),
         }

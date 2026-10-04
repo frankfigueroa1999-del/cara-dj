@@ -1331,7 +1331,7 @@ def resume_spotify(device_id=None):
     for attempt in range(30):          # about half a minute of trying
         cur = None
         try:
-            cur = sp.current_playback()
+            cur = current_playback(1.5)
             if cur and cur.get("is_playing"):
                 return True
             dev = device_id or ((cur or {}).get("device") or {}).get("id")
@@ -1594,11 +1594,32 @@ def play_clip(path):
         STATUS["speaking"] = False
 
 
+PLAYBACK = None  # the app sets this: what's playing, read from its built-in player or one request it shares with Cara
+VOLUME = None    # the app sets this: changes the volume on its built-in player itself when the music plays there
+
+
+def current_playback(fresh=15.0):
+    """What's playing (spotipy's shape). Through the app when there is one, so Spotify isn't asked more than it has to
+    be (it counts every request): an answer at most `fresh` seconds old, moved on to now."""
+    if PLAYBACK:
+        return PLAYBACK(fresh)
+    return sp.current_playback()
+
+
 def set_volume(v):
+    """True when the built-in player took it straight (no request to Spotify)."""
+    v = int(max(0, min(100, v)))
+    if VOLUME:
+        try:
+            if VOLUME(v):
+                return True
+        except Exception:
+            pass
     try:
-        sp.volume(int(max(0, min(100, v))))
+        sp.volume(v)
     except Exception as e:
         print("Could not change Spotify volume:", e)
+    return False
 
 
 def fade_volume(start, end, seconds, steps=None):
@@ -1610,16 +1631,17 @@ def fade_volume(start, end, seconds, steps=None):
     seconds = max(seconds, 0.6)           # too-short fades sound like a cut
     t0 = time.time()
     last = None
+    here = False
     while True:
         f = min(1.0, (time.time() - t0) / seconds)
         f = f * f * (3 - 2 * f)           # ease in/out
         v = int(round(start + (end - start) * f))
         if v != last:
-            set_volume(v)
+            here = set_volume(v)
             last = v
         if f >= 1.0:
             break
-        time.sleep(0.05)
+        time.sleep(0.05 if here else 0.2)     # through Spotify's servers: fewer, bigger steps (each one is a request)
     if last != int(round(end)):
         set_volume(end)
 
@@ -1733,7 +1755,7 @@ def _run_transition(style, path, vol, uri, p, late=False):
         finally:
             time.sleep(0.2)
             try:
-                cur = sp.current_playback()
+                cur = current_playback(0.5)
                 same = bool(cur and cur.get("item") and cur["item"].get("uri") == uri)
                 if same:  # the old song is still 'current': jump to the next one
                     sp.next_track()
@@ -1910,7 +1932,8 @@ def main():
             last_poll = now
             try:
                 t0 = time.time()
-                pb = sp.current_playback()
+                # (through the app: fresh near the end of a song, otherwise whatever the app last heard)
+                pb = current_playback(4.0 if remaining is not None and remaining < 15000 else 15.0 if state["playing"] else 60.0)
                 t1 = time.time()
             except Exception as e:
                 wait = getattr(e, "wait", None)

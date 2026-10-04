@@ -392,6 +392,9 @@ class Player:
         self.said_hidden = False
         self.skip = []                 # songs to skip the moment they start (taken out of the queue in the app)
         self.on_skipped = None
+        self.state = None              # what the player page says is playing (the app reads it instead of asking Spotify)
+        self.state_at = 0.0
+        self.on_state = None
         self.launch = 0                # which start this is: a page from an earlier one is told to close itself
         self.launches = []             # when the browser was started lately (a hard stop if it keeps happening)
         self.pid = None                # the browser process that has the player page (not always the one started)
@@ -422,6 +425,8 @@ class Player:
     def _set(self, status, problem=""):
         changed = (status, problem) != (self.status, self.problem)
         self.status, self.problem = status, problem
+        if status != "ready":
+            self.state = None
         if changed:
             self.on_change(status)
 
@@ -725,3 +730,17 @@ class Player:
         elif kind == "skipped":
             if self.on_skipped:
                 self.on_skipped(str(e.get("uri") or ""))
+        elif kind == "state":
+            if self.status == "ready":
+                had = bool((self.state or {}).get("track"))
+                self.state, self.state_at = e, time.time()
+                if (had or e.get("track")) and self.on_state:      # something's (or was) playing here: show it now
+                    self.on_state()
+
+    def playing_state(self, max_age=25):
+        """What the player page last said is playing, if it said so lately and this player is ready; else None.
+        {"none": True} means the music isn't playing here (it's on another device, or nothing is loaded)."""
+        st = self.state
+        if self.status != "ready" or not self.device_id or not st or time.time() - self.state_at > max_age:
+            return None
+        return st

@@ -61,15 +61,37 @@ def safe(fn, default=None):
 # Client ID. When it answers 429 ("too many requests"), every request from this app (and from Cara) waits: as long as
 # Spotify says, at least 30 seconds, and longer each time it happens again soon after. Asking anyway only keeps the
 # limit going. What's playing is also asked for once and shared, rather than separately by the app and by Cara.
-_limit = {"until": 0.0, "strikes": 0, "last": 0.0}
+#   A 429 that says "QUOTA_EXCEEDED" is different: the request quota of the whole developer account (every app made on
+# it counts together) is used up. Then the app waits as long as Spotify says, even hours, and says when it'll ask again.
+_limit = {"until": 0.0, "strikes": 0, "last": 0.0, "quota": False}
 _shared = {"at": 0.0, "value": None}
+
+
+def clock(ts):
+    """A time of day like "3:05 AM"."""
+    return time.strftime("%I:%M %p", time.localtime(ts)).lstrip("0")
+
+
+def quota_out():
+    """True while the developer account's quota is used up (rather than a short slow-down)."""
+    return bool(_limit["quota"] and limited())
+
+
+def wait_text():
+    """Why the app can't ask Spotify right now, for a button that didn't work."""
+    if quota_out():
+        return f"Spotify's request quota for your developer account is used up. The app tries again at {clock(_limit['until'])}."
+    return f"Spotify asked the app to slow down. Try again in {int(limited()) + 1} seconds."
 
 
 class SlowDown(Exception):
     http_status = 429
 
     def __init__(self, wait):
-        super().__init__(f"Spotify asked this app to slow down; asking again in {int(wait) + 1} s")
+        if _limit["quota"]:
+            super().__init__(f"the request quota of your Spotify developer account is used up; asking again at {clock(time.time() + wait)}")
+        else:
+            super().__init__(f"Spotify asked this app to slow down; asking again in {int(wait) + 1} s")
         self.wait = wait
 
 
@@ -78,15 +100,24 @@ def limited():
     return max(0.0, _limit["until"] - time.time())
 
 
-def _note_limit(retry_after):
+def _note_limit(retry_after, reason=""):
     now = time.time()
+    if str(reason or "").upper() == "QUOTA_EXCEEDED":
+        wait = min(retry_after or 3600, 26 * 3600)       # as long as Spotify says (an hour if it doesn't say)
+        if now + wait > _limit["until"]:
+            _limit.update(until=now + wait, quota=True, last=now)
+            said = f"{retry_after} s" if retry_after else "nothing"
+            print(f"Spotify says the request quota of your Spotify developer account is used up (every app made on that account "
+                  f"counts together). Spotify said to wait {said}; the app asks again at {clock(now + wait)}. Music already "
+                  f"playing in the built-in player keeps playing.")
+        return
     if now - _limit["last"] > 900:
         _limit["strikes"] = 0                            # it's been a while: start over
     _limit["strikes"] = min(_limit["strikes"] + 1, 6)
     _limit["last"] = now
     wait = min(max(retry_after, 30 * 2 ** (_limit["strikes"] - 1)), 3600)    # 30 s, 1, 2, 4, 8, 16 minutes
     if now + wait > _limit["until"]:
-        _limit["until"] = now + wait
+        _limit.update(until=now + wait, quota=False)
         print(f"Spotify asked the app to slow down (too many requests): waiting {int(wait)} s before asking again.")
 
 
@@ -112,7 +143,7 @@ def guard(client):
                     ra = int((getattr(e, "headers", None) or {}).get("Retry-After") or 0)
                 except (TypeError, ValueError):
                     ra = 0
-                _note_limit(ra)
+                _note_limit(ra, getattr(e, "reason", "") or ("QUOTA_EXCEEDED" if "QUOTA_EXCEEDED" in str(e) else ""))
             raise
         if mine:
             _shared.update(at=time.time(), value=got)
@@ -629,11 +660,12 @@ def genre_page(gid):
 def playback():
     """What's playing (None when Spotify couldn't be asked, {} when nothing is)."""
     t0 = time.time()
-    try:
-        j = get("me/player", additional_types="track")
-    except Exception as e:
-        raise e
-    t1 = time.time()
+    j = get("me/player", additional_types="track")
+    return shape(j, (t0 + time.time()) / 2)
+
+
+def shape(j, at):
+    """The app's view of Spotify's answer to "what's playing" (j), as it was at the time `at` (seconds)."""
     if not j:
         return {}
     item = j.get("item") if (j.get("currently_playing_type") or "track") == "track" else None
@@ -641,7 +673,7 @@ def playback():
     return {
         "playing": bool(j.get("is_playing")),
         "progress": j.get("progress_ms") or 0,
-        "stamp": int((t0 + t1) / 2 * 1000),
+        "stamp": int(at * 1000),
         "shuffle": bool(j.get("shuffle_state")),
         "repeat": j.get("repeat_state") or "off",
         "device": device(dev) if dev else None,
@@ -649,6 +681,25 @@ def playback():
         "rawContext": j.get("context"),
         "track": track(item) if item else None,
     }
+
+
+_details = {}
+_details_lock = threading.Lock()
+
+
+def details(tid):
+    """A song's full details from Spotify (asked once per song): the built-in player's own report leaves some out."""
+    if not tid:
+        return None
+    with _details_lock:                                  # the app and Cara both want it when a song starts: ask once
+        if tid not in _details:
+            got = safe(lambda: get(f"tracks/{tid}"))
+            if got is None and limited():
+                return None                              # try again once Spotify allows it
+            _details[tid] = got or {}
+            if len(_details) > 300:
+                _details.pop(next(iter(_details)))
+        return _details[tid] or None
 
 
 def devices():

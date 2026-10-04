@@ -56,6 +56,7 @@
     player.addListener('player_state_changed', st => {
       const t = st && st.track_window && st.track_window.current_track;
       media(st, t);
+      report(st);
       if (!t || t.uri === lastUri) return;
       lastUri = t.uri;
       const hit = [t.uri, t.linked_from && t.linked_from.uri].find(u => u && skip.has(u));
@@ -63,6 +64,24 @@
     });
     player.connect().then(ok => { if (!ok) post('log', { message: 'the player could not connect to Spotify' }); });
   };
+
+  // What's playing, for the app. While the music plays here the app reads the song, where it's at and whether it's
+  // paused from this page, instead of asking Spotify's servers every few seconds (Spotify counts every request).
+  const tr = x => x ? ({ uri: x.uri || '', id: x.id || (x.uri || '').split(':').pop(), type: x.type || 'track', name: x.name || '',
+    duration_ms: x.duration_ms || 0, linked: (x.linked_from && x.linked_from.uri) || '',
+    artists: (x.artists || []).map(a => ({ name: a.name || '', uri: a.uri || '', id: (a.uri || '').split(':').pop() })),
+    album: x.album ? { name: x.album.name || '', uri: x.album.uri || '', id: (x.album.uri || '').split(':').pop(), images: x.album.images || [] } : null }) : null;
+  async function report(st) {
+    if (!player || !readyAt) return;
+    if (st === undefined) st = await player.getCurrentState().catch(() => null);
+    const t = st && st.track_window && st.track_window.current_track;
+    let volume = null;
+    try { volume = Math.round((await player.getVolume()) * 100); } catch (e) { /* not yet */ }
+    post('state', t ? { paused: !!st.paused, position: st.position || 0, duration: st.duration || t.duration_ms || 0, shuffle: !!st.shuffle,
+      repeat: st.repeat_mode || 0, context: (st.context && st.context.uri) || '',
+      contextName: (st.context && st.context.metadata && st.context.metadata.name) || '', track: tr(t), volume } : { none: true, volume });
+  }
+  setInterval(() => report(), 5000);       // and every few seconds anyway, so the app knows this page is still the one playing
 
   // Windows' media controls (keyboard media keys, the volume flyout, a tablet's buttons). Chrome hands them to the
   // top-most frame that plays sound. The music plays inside Spotify's own frame, which only answers play and pause,
@@ -128,6 +147,7 @@
     if (!run) return 'unknown';
     await within(run());
     const st = await within(player.getCurrentState()).catch(() => null);
+    report(st || undefined);
     return st ? (st.paused ? 'paused' : 'playing') : 'ok';
   };
 
