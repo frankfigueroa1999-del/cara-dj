@@ -262,13 +262,28 @@ FORCE_STINGER = threading.Event()   # set this to fire a station tag right now (
 FORCE_DUO = threading.Event()       # set this to hear Cara and Scratch right now (test button)
 STATUS = {"speaking": False, "songs_left": None}   # for the app: Cara on the air right now, and songs until her next break
 
+def _spotify_session():
+    """A hiccup on Spotify's side (500-504) is tried again twice, but a "too many requests" (429) comes straight back,
+    so the app can wait as long as Spotify asks without anything hanging. (Left to itself, the HTTP library would sit
+    out Spotify's wait inside the request, as long as Spotify says, then ask twice more: frozen for minutes, and only
+    making the limit last longer.) Only requests that are safe to repeat are tried again: never a skip or a queue add."""
+    import urllib3
+    from requests.adapters import HTTPAdapter
+    retry = urllib3.Retry(total=2, connect=None, read=False, status=2, backoff_factor=0.5,
+                          allowed_methods=frozenset(["GET", "PUT", "DELETE"]),
+                          status_forcelist=(500, 502, 503, 504), respect_retry_after_header=False)
+    s = requests.Session()
+    s.mount("https://", HTTPAdapter(max_retries=retry))
+    s.mount("http://", HTTPAdapter(max_retries=retry))
+    return s
+
+
 sp = spotipy.Spotify(
     auth_manager=SpotifyOAuth(
         scope=os.environ.get("DJ_SCOPES") or "user-read-playback-state user-modify-playback-state",
         cache_path=os.environ.get("DJ_CACHE_PATH") or None,
     ),
-    retries=2, status_retries=2, backoff_factor=0.5,
-    status_forcelist=(500, 502, 503, 504),     # a "too many requests" (429) is never retried on the spot: the app waits
+    requests_session=_spotify_session(),
 )
 pygame.mixer.init()
 

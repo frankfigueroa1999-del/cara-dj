@@ -233,6 +233,8 @@ class App:
         self.connected = False
         self.connecting = False
         self.problem = ""
+        self.problem_kind = ""      # "unregistered": Spotify doesn't know this account (the banner offers the dashboard)
+        self.later = None           # connects again by itself after Spotify's "slow down"
         self.hint = ""              # "no-device" when Spotify has nowhere to play
         self.now = None             # latest playback snapshot (pc_spotify.playback())
         self.context_name = ""
@@ -381,7 +383,7 @@ class App:
             except OSError:
                 pass
         self.connecting = True
-        self.problem = ""
+        self.problem = self.problem_kind = ""
 
         def work():
             try:
@@ -396,8 +398,20 @@ class App:
                 self.connected = False
                 msg = str(e)
                 low = msg.lower()
-                if "403" in low or "not registered" in low:
+                wait = pc_spotify.limited() if getattr(e, "http_status", None) == 429 else 0
+                if wait:
+                    self.problem = ("Spotify asked this app to slow down (too many requests from everyone using this Client ID). "
+                                    f"It connects by itself in about {int(wait // 60) + 1} min.")
+                    self.connect_later(wait + 2)
+                elif "not registered" in low:
+                    self.problem = ("Spotify says the account you signed in with isn't on your Spotify app's user list. At developer.spotify.com/dashboard, "
+                                    "open the app whose Client ID is in Settings, then Settings, User Management: add that account's name and email, then press Connect.")
+                    self.problem_kind = "unregistered"
+                elif "premium" in low and "403" in low:
+                    self.problem = "Spotify says the owner of your Spotify developer app needs Premium. Use an app made with a Premium account (Settings, Client ID and Secret)."
+                elif "403" in low:
                     self.problem = "Spotify said no: add the email of your Spotify account under User Management in your Spotify app (developer.spotify.com), then try again."
+                    self.problem_kind = "unregistered"
                 elif "invalid_client" in low or "invalid client" in low:
                     self.problem = "Spotify didn't recognise that Client ID and Secret. Check them in Settings."
                 else:
@@ -408,6 +422,19 @@ class App:
                 self.poke.set()
 
         threading.Thread(target=work, daemon=True).start()
+
+    def connect_later(self, wait):
+        """Connect again by itself once Spotify's "slow down" is over (unless you already did)."""
+        if self.later:
+            self.later.cancel()
+
+        def again():
+            if not (self.connected or self.connecting):
+                self.connect()
+
+        self.later = threading.Timer(wait, again)
+        self.later.daemon = True
+        self.later.start()
 
     def logout(self):
         if self.dj_running():
@@ -616,7 +643,7 @@ class App:
                     print("Spotify did not answer:", msg[:300])
                     low = msg.lower()
                     if "403" in low or "forbidden" in low or "not registered" in low:
-                        print("Fix: in developer.spotify.com > your app > Settings > User Management, add the email of your Spotify account, then restart this app.")
+                        print("Fix: in developer.spotify.com > your app > Settings > User Management, add the name and email of the Spotify account you signed in with, then in this app: Settings > Reconnect.")
                     elif "401" in low or "token" in low:
                         print("Fix: in Settings, press Reconnect Spotify and click Agree.")
                     elif "429" in low:
@@ -1036,6 +1063,7 @@ class App:
             "connected": self.connected,
             "connecting": self.connecting,
             "problem": self.problem,
+            "problemKind": self.problem_kind,
             "hint": self.hint,
             "keys": bool(self.cfg["spotify_client_id"] and self.cfg["spotify_client_secret"]),
             "me": pc_spotify._me["value"] if self.connected else None,

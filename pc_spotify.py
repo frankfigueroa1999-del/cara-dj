@@ -106,7 +106,8 @@ def guard(client):
         try:
             got = orig(method, url, payload, params)
         except Exception as e:
-            if getattr(e, "http_status", None) == 429:
+            # (spotipy also reports Spotify's servers failing three times running as a 429, "too many 502 error responses")
+            if getattr(e, "http_status", None) == 429 and "too many 5" not in str(getattr(e, "reason", "") or ""):
                 try:
                     ra = int((getattr(e, "headers", None) or {}).get("Retry-After") or 0)
                 except (TypeError, ValueError):
