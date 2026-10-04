@@ -406,9 +406,9 @@ class App:
                 elif "not registered" in low:
                     cid = self.cfg["spotify_client_id"].strip()
                     cid = f"{cid[:6]}…{cid[-4:]}" if len(cid) > 12 else cid
-                    self.problem = ("Spotify doesn't know the account you signed in with. Press Sign in again and look at the account Spotify shows: it has to be "
-                                    f"on the User Management list of the developer app with Client ID {cid} (if not, click Not you? and switch). On that list, "
-                                    "the email has to be the one at spotify.com/account for that account.")
+                    self.problem = ("Spotify doesn't know the account you signed in with. Sign in again and check the account Spotify shows (wrong one? "
+                                    f"click Not you?). Its email, exactly as shown at spotify.com/account/profile, has to be under User Management of the "
+                                    f"developer app with Client ID {cid}.")
                     self.problem_kind = "unregistered"
                 elif "premium" in low and "403" in low:
                     self.problem = "Spotify says the owner of your Spotify developer app needs Premium. Use an app made with a Premium account (Settings, Client ID and Secret)."
