@@ -404,8 +404,11 @@ class App:
                                     f"It connects by itself in about {int(wait // 60) + 1} min.")
                     self.connect_later(wait + 2)
                 elif "not registered" in low:
-                    self.problem = ("Spotify says the account you signed in with isn't on your Spotify app's user list. At developer.spotify.com/dashboard, "
-                                    "open the app whose Client ID is in Settings, then Settings, User Management: add that account's name and email, then press Connect.")
+                    cid = self.cfg["spotify_client_id"].strip()
+                    cid = f"{cid[:6]}…{cid[-4:]}" if len(cid) > 12 else cid
+                    self.problem = ("Spotify doesn't know the account you signed in with. Press Sign in again and look at the account Spotify shows: it has to be "
+                                    f"on the User Management list of the developer app with Client ID {cid} (if not, click Not you? and switch). On that list, "
+                                    "the email has to be the one at spotify.com/account for that account.")
                     self.problem_kind = "unregistered"
                 elif "premium" in low and "403" in low:
                     self.problem = "Spotify says the owner of your Spotify developer app needs Premium. Use an app made with a Premium account (Settings, Client ID and Secret)."

@@ -282,6 +282,7 @@ sp = spotipy.Spotify(
     auth_manager=SpotifyOAuth(
         scope=os.environ.get("DJ_SCOPES") or "user-read-playback-state user-modify-playback-state",
         cache_path=os.environ.get("DJ_CACHE_PATH") or None,
+        show_dialog=True,      # signing in always shows which Spotify account it is (and lets you switch), never a silent redirect
     ),
     requests_session=_spotify_session(),
 )
